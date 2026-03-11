@@ -1,0 +1,53 @@
+[tool.ruff.lint]
+select = [
+    #         Ruff default rules
+    # ------------------------------
+    "E4", # pycodestyle Imports
+    "E7", # pycodestyle Statements
+    "E9", # pycodestyle Runtime
+    "F",  # Pyflakes
+
+    #         Additional    Comment
+    # ------------------------------------------------------
+    "I",  # isort         Best-practice sorting of imports
+    "UP", # pyupgrade     Make sure syntax is up-to-date
+]
+ignore = [
+    "E402", # Module level import not at top of file
+    "E722", # Do not use bare 'except'
+    "E741", # Ambiguous variable name
+]
+
+[project]
+name = "dataflow_archive"
+version = "0.0.1"
+description = "Script for archiving sequencing data to tape"
+authors = [
+    { name = "Sara Sjunnebo", email = "sara.sjunnebo@scilifelab.se" },
+]
+readme = "README.md"
+
+requires-python = ">=3.14"
+dependencies = [
+    "click",
+    "ibmcloudant",
+    "pyYAML",
+]
+
+[project.optional-dependencies]
+
+dev = [
+    "ruff>=0.11.8",
+    "pytest",
+    "pytest-cov",
+]
+
+[project.scripts]
+dataflow_archive = "dataflow_archive.cli:cli"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
