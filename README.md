@@ -96,7 +96,7 @@ statusdb:
   url: couchdb.host.com
   database: sequencing_runs
 
-data_dirs:
+sequencing_dirs:
   - /sequencing/MiSeqi100
   - /sequencing/NextSeq/Runs
   - /sequencing/PromethION
@@ -105,12 +105,12 @@ ignore_folders:
 archive_dir: /sequencing/archiving
 sequencer_specific_settings:
   Illumina:
-    tar_exclude:
+    tar_exclude_patterns:
       - Demultiplex*
     final_file:
       - CopyComplete.txt
   ONT:
-    tar_exclude:
+    tar_exclude_patterns:
       - Pod5*
     final_file:
       - final_summary.txt

@@ -52,8 +52,8 @@ def cli(ctx, config_file, run):
 def encrypt(ctx):
     """Tar and encrypt run directories based on the provided configuration."""
     config = ctx.obj.get("config")
-    run = ctx.obj.get("run")
-    encrypt_runs(config, run)
+    given_run = ctx.obj.get("run")
+    encrypt_runs(config, given_run)
 
 
 @cli.command()
@@ -61,5 +61,5 @@ def encrypt(ctx):
 def upload(ctx):
     """Upload enctypted runs to PDC."""
     config = ctx.obj.get("config")
-    run = ctx.obj.get("run")
-    upload_runs(config, run)
+    given_run = ctx.obj.get("run")
+    upload_runs(config, given_run)
