@@ -41,6 +41,10 @@ def load_config(config_path: Path):
     if not sequencing_path:
         raise RuntimeError("Missing required config entry: sequencing_path")
 
+    destination_path = config.get("destination_path")
+    if not destination_path:
+        raise RuntimeError("Missing required config entry: destination_path")
+
     ignore_list = config.get("ignore", [])
     if ignore_list is None:
         ignore_list = []
@@ -56,6 +60,7 @@ def load_config(config_path: Path):
     return {
         "statusdb": statusdb,
         "sequencing_path": sequencing_path,
+        "destination_path": destination_path,
         "ignore": ignore_list,
         "final_files": final_files,
     }
@@ -120,10 +125,10 @@ async def update_status(session, doc, status, couchdb_url):
 # ------------------------
 
 
-async def run_pipeline(run_path: Path):
-    output_file = run_path.with_suffix(".tar.gz.gpg")  # TODO: change the location
+async def run_pipeline(run_path: Path, destination_path: Path):
+    output_file = destination_path / f"{run_path.name}.tar.gpg"
 
-    tar_cmd = ["tar", "-czf", "-", "-C", str(run_path.parent), run_path.name]
+    tar_cmd = ["tar", "-cf", "-", "-C", str(run_path.parent), run_path.name]
     gpg_cmd = [
         "gpg",
         "--encrypt",
@@ -172,14 +177,14 @@ async def validate_gpg(file_path: Path):
 # ------------------------
 
 
-async def process_run(session, doc, couchdb_url):
+async def process_run(session, doc, couchdb_url, destination_path: Path):
     async with sem:
         run_path = Path(doc["path"])
 
         try:
             log.info(f"Processing {run_path}")
 
-            output = await run_pipeline(run_path)
+            output = await run_pipeline(run_path, destination_path)
             await validate_gpg(output)
 
             await update_status(session, doc, "done", couchdb_url)
@@ -196,7 +201,11 @@ async def process_run(session, doc, couchdb_url):
 
 
 async def scan_for_new_runs(
-    session, couchdb_url, sequencing_path: Path, ignore_dirs: list[str], final_files: list[str]
+    session,
+    couchdb_url,
+    sequencing_path: Path,
+    ignore_dirs: list[str],
+    final_files: list[str],
 ):
     for sequencer_dir in sequencing_path.iterdir():
         if not sequencer_dir.is_dir():
@@ -235,6 +244,7 @@ async def main(config_path: Path):
     conf = load_config(config_path)
     statusdb_conf = conf["statusdb"]
     sequencing_path = Path(conf["sequencing_path"])
+    destination_path = Path(conf["destination_path"])
     ignore_dirs = conf["ignore"]
     final_files = conf["final_files"]
 
@@ -243,12 +253,19 @@ async def main(config_path: Path):
             f"sequencing_path does not exist or is not a directory: {sequencing_path}"
         )
 
+    if not destination_path.is_dir():
+        raise RuntimeError(
+            f"destination_path does not exist or is not a directory: {destination_path}"
+        )
+
     couchdb_url = build_couchdb_url(statusdb_conf)
     auth = aiohttp.BasicAuth(statusdb_conf["username"], statusdb_conf["password"])
 
     async with aiohttp.ClientSession(auth=auth) as session:
         while True:
-            await scan_for_new_runs(session, couchdb_url, sequencing_path, ignore_dirs, final_files)
+            await scan_for_new_runs(
+                session, couchdb_url, sequencing_path, ignore_dirs, final_files
+            )
 
             # fetch pending jobs
             async with session.get(couchdb_url) as resp:
@@ -262,7 +279,9 @@ async def main(config_path: Path):
 
                 claimed = await claim_run(session, doc, couchdb_url)
                 if claimed:
-                    tasks.append(process_run(session, doc, couchdb_url))
+                    tasks.append(
+                        process_run(session, doc, couchdb_url, destination_path)
+                    )
 
             if tasks:
                 await asyncio.gather(*tasks)
