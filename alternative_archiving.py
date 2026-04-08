@@ -10,7 +10,6 @@ from urllib.parse import urlparse
 import aiohttp
 import yaml
 
-DONE_FILE = "RTAComplete.txt"
 MAX_CONCURRENT_JOBS = 2
 
 WORKER_ID = socket.gethostname()
@@ -30,7 +29,36 @@ def load_config(config_path: Path):
     if not isinstance(config, dict):
         raise RuntimeError("Config file must contain a mapping")
 
-    return config
+    statusdb = config.get("statusdb")
+    if not isinstance(statusdb, dict):
+        raise RuntimeError("Missing 'statusdb' section in config")
+
+    for key in ("username", "password", "url", "database"):
+        if not statusdb.get(key):
+            raise RuntimeError(f"Missing required statusdb config: {key}")
+
+    sequencing_path = config.get("sequencing_path")
+    if not sequencing_path:
+        raise RuntimeError("Missing required config entry: sequencing_path")
+
+    ignore_list = config.get("ignore", [])
+    if ignore_list is None:
+        ignore_list = []
+    if not isinstance(ignore_list, list):
+        raise RuntimeError("Config entry 'ignore' must be a list")
+
+    final_files = config.get("final_files", [])
+    if final_files is None:
+        final_files = []
+    if not isinstance(final_files, list):
+        raise RuntimeError("Config entry 'final_files' must be a list")
+
+    return {
+        "statusdb": statusdb,
+        "sequencing_path": sequencing_path,
+        "ignore": ignore_list,
+        "final_files": final_files,
+    }
 
 
 def build_couchdb_url(statusdb: dict) -> str:
@@ -168,7 +196,7 @@ async def process_run(session, doc, couchdb_url):
 
 
 async def scan_for_new_runs(
-    session, couchdb_url, sequencing_path: Path, ignore_dirs: list[str]
+    session, couchdb_url, sequencing_path: Path, ignore_dirs: list[str], final_files: list[str]
 ):
     for sequencer_dir in sequencing_path.iterdir():
         if not sequencer_dir.is_dir():
@@ -180,7 +208,9 @@ async def scan_for_new_runs(
             if run_dir.name in ignore_dirs:
                 continue
 
-            if not (run_dir / DONE_FILE).exists():
+            # Check if any of the final files exist
+            has_final_file = any((run_dir / f).exists() for f in final_files)
+            if not has_final_file:
                 continue
 
             doc = {
@@ -206,6 +236,7 @@ async def main(config_path: Path):
     statusdb_conf = conf["statusdb"]
     sequencing_path = Path(conf["sequencing_path"])
     ignore_dirs = conf["ignore"]
+    final_files = conf["final_files"]
 
     if not sequencing_path.is_dir():
         raise RuntimeError(
@@ -217,7 +248,7 @@ async def main(config_path: Path):
 
     async with aiohttp.ClientSession(auth=auth) as session:
         while True:
-            await scan_for_new_runs(session, couchdb_url, sequencing_path, ignore_dirs)
+            await scan_for_new_runs(session, couchdb_url, sequencing_path, ignore_dirs, final_files)
 
             # fetch pending jobs
             async with session.get(couchdb_url) as resp:
