@@ -10,7 +10,6 @@ from urllib.parse import urlparse
 import aiohttp
 import yaml
 
-BASE_DIR = Path("/data/sequencing_runs")
 DONE_FILE = "RTAComplete.txt"
 MAX_CONCURRENT_JOBS = 2
 
@@ -168,25 +167,33 @@ async def process_run(session, doc, couchdb_url):
 # ------------------------
 
 
-async def scan_for_new_runs(session, couchdb_url):
-    for run_dir in BASE_DIR.iterdir():
-        if not run_dir.is_dir():
+async def scan_for_new_runs(
+    session, couchdb_url, sequencing_path: Path, ignore_dirs: list[str]
+):
+    for sequencer_dir in sequencing_path.iterdir():
+        if not sequencer_dir.is_dir():
             continue
 
-        if not (run_dir / DONE_FILE).exists():
-            continue
+        for run_dir in sequencer_dir.iterdir():
+            if not run_dir.is_dir():
+                continue
+            if run_dir.name in ignore_dirs:
+                continue
 
-        doc = {
-            "_id": run_dir.name,
-            "path": str(run_dir),
-            "status": "pending",
-            "created_at": datetime.now(datetime.timezone.utc).isoformat(),
-        }
+            if not (run_dir / DONE_FILE).exists():
+                continue
 
-        try:
-            await session.put(f"{couchdb_url}/{doc['_id']}", json=doc)
-        except Exception:
-            pass  # already exists
+            doc = {
+                "_id": run_dir.name,
+                "path": str(run_dir),
+                "status": "pending",
+                "created_at": datetime.now(datetime.timezone.utc).isoformat(),
+            }
+
+            try:
+                await session.put(f"{couchdb_url}/{doc['_id']}", json=doc)
+            except Exception:
+                pass  # already exists
 
 
 # ------------------------
@@ -196,13 +203,21 @@ async def scan_for_new_runs(session, couchdb_url):
 
 async def main(config_path: Path):
     conf = load_config(config_path)
-    statusdb_conf = conf.get("statusdb")
+    statusdb_conf = conf["statusdb"]
+    sequencing_path = Path(conf["sequencing_path"])
+    ignore_dirs = conf["ignore"]
+
+    if not sequencing_path.is_dir():
+        raise RuntimeError(
+            f"sequencing_path does not exist or is not a directory: {sequencing_path}"
+        )
+
     couchdb_url = build_couchdb_url(statusdb_conf)
     auth = aiohttp.BasicAuth(statusdb_conf["username"], statusdb_conf["password"])
 
     async with aiohttp.ClientSession(auth=auth) as session:
         while True:
-            await scan_for_new_runs(session, couchdb_url)
+            await scan_for_new_runs(session, couchdb_url, sequencing_path, ignore_dirs)
 
             # fetch pending jobs
             async with session.get(couchdb_url) as resp:
