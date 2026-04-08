@@ -39,14 +39,20 @@ class Run:
 
 def encrypt_run(run_dir, config):
     run = Run(run_dir, config)
-    logger.info(
-        f"Processing run {run.run_id} of type {run.run_type}"
-    )
+    # Check that the status in StatusDB is not already "archived" or similar
+    # Check if the sequencing has finished
+    # Check that the run is not already in PDC
+    # Check that encryption is not already done
+    # Check that encryption is not already ongoing
+    # If all checks pass, proceed with encryption
+    # Generate a random key for the run (do we want to put the key in the same location as the run on PDC?)
+    # Tar and encrypt the runfolder into a separate location, naming the 
 
 
 def encrypt_runs(config, given_run=None):
     """Tar and encrypt run directories based on the provided configuration."""
     start_time = time.time()
+    # TODO: Check if there are too many tar or gpg running on the system already
     if given_run:
         logger.info(f"Encrypting specific run: {given_run}")
         run_dir = get_run_dir(given_run)
