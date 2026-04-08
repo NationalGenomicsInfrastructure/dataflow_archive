@@ -1,17 +1,58 @@
+import argparse
 import asyncio
 import logging
+import os
 import socket
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import aiohttp
+import yaml
 
 BASE_DIR = Path("/data/sequencing_runs")
 DONE_FILE = "RTAComplete.txt"
 MAX_CONCURRENT_JOBS = 2
-COUCHDB_URL = "http://localhost:5984/runs"
 
 WORKER_ID = socket.gethostname()
+
+CONFIG_DEFAULT_PATH = Path(
+    os.environ.get(
+        "ARCHIVE_CONFIG",
+        os.path.join(os.path.expanduser("~"), ".df_archive/df_archive.yaml"),
+    )
+).expanduser()
+
+
+def load_config(config_path: Path):
+    with config_path.open() as file:
+        config = yaml.safe_load(file)
+
+    if not isinstance(config, dict):
+        raise RuntimeError("Config file must contain a mapping")
+
+    statusdb = config.get("statusdb")
+    if not isinstance(statusdb, dict):
+        raise RuntimeError("Missing 'statusdb' section in config")
+
+    for key in ("username", "password", "url", "database"):
+        if not statusdb.get(key):
+            raise RuntimeError(f"Missing required statusdb config: {key}")
+
+    return statusdb
+
+
+def build_couchdb_url(statusdb: dict) -> str:
+    raw_url = statusdb["url"].strip()
+    if not raw_url:
+        raise RuntimeError("statusdb.url must not be empty")
+
+    if not urlparse(raw_url).scheme:
+        raw_url = f"http://{raw_url}"
+
+    database = statusdb["database"].strip().lstrip("/")
+    return f"{raw_url.rstrip('/')}/{database}"
+
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("pipeline")
@@ -23,20 +64,20 @@ sem = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 # ------------------------
 
 
-async def fetch_pending_runs(session):
+async def fetch_pending_runs(session, couchdb_url):
     # simplistic: you'd normally use a view
-    async with session.get(COUCHDB_URL) as resp:
+    async with session.get(couchdb_url) as resp:
         data = await resp.json()
         return data.get("rows", [])
 
 
-async def claim_run(session, doc):
+async def claim_run(session, doc, couchdb_url):
     updated = doc.copy()
     updated["status"] = "processing"
     updated["worker_id"] = WORKER_ID
     updated["updated_at"] = datetime.now(datetime.timezone.utc).isoformat()
 
-    url = f"{COUCHDB_URL}/{doc['_id']}"
+    url = f"{couchdb_url}/{doc['_id']}"
 
     async with session.put(url, json=updated) as resp:
         if resp.status == 409:
@@ -48,11 +89,11 @@ async def claim_run(session, doc):
             raise RuntimeError(f"CouchDB error: {resp.status} {text}")
 
 
-async def update_status(session, doc, status):
+async def update_status(session, doc, status, couchdb_url):
     doc["status"] = status
     doc["updated_at"] = datetime.now(datetime.timezone.utc).isoformat()
 
-    await session.put(f"{COUCHDB_URL}/{doc['_id']}", json=doc)
+    await session.put(f"{couchdb_url}/{doc['_id']}", json=doc)
 
 
 # ------------------------
@@ -112,7 +153,7 @@ async def validate_gpg(file_path: Path):
 # ------------------------
 
 
-async def process_run(session, doc):
+async def process_run(session, doc, couchdb_url):
     async with sem:
         run_path = Path(doc["path"])
 
@@ -122,12 +163,12 @@ async def process_run(session, doc):
             output = await run_pipeline(run_path)
             await validate_gpg(output)
 
-            await update_status(session, doc, "done")
+            await update_status(session, doc, "done", couchdb_url)
             log.info(f"Completed {run_path}")
 
         except Exception as e:
             log.exception(f"Failed {run_path}: {e}")
-            await update_status(session, doc, "failed")
+            await update_status(session, doc, "failed", couchdb_url)
 
 
 # ------------------------
@@ -135,7 +176,7 @@ async def process_run(session, doc):
 # ------------------------
 
 
-async def scan_for_new_runs(session):
+async def scan_for_new_runs(session, couchdb_url):
     for run_dir in BASE_DIR.iterdir():
         if not run_dir.is_dir():
             continue
@@ -151,7 +192,7 @@ async def scan_for_new_runs(session):
         }
 
         try:
-            await session.put(f"{COUCHDB_URL}/{doc['_id']}", json=doc)
+            await session.put(f"{couchdb_url}/{doc['_id']}", json=doc)
         except Exception:
             pass  # already exists
 
@@ -161,13 +202,17 @@ async def scan_for_new_runs(session):
 # ------------------------
 
 
-async def main():
-    async with aiohttp.ClientSession() as session:
+async def main(config_path: Path):
+    statusdb = load_config(config_path)
+    couchdb_url = build_couchdb_url(statusdb)
+    auth = aiohttp.BasicAuth(statusdb["username"], statusdb["password"])
+
+    async with aiohttp.ClientSession(auth=auth) as session:
         while True:
-            await scan_for_new_runs(session)
+            await scan_for_new_runs(session, couchdb_url)
 
             # fetch pending jobs
-            async with session.get(COUCHDB_URL) as resp:
+            async with session.get(couchdb_url) as resp:
                 data = await resp.json()
                 docs = [row["doc"] for row in data.get("rows", [])]
 
@@ -176,9 +221,9 @@ async def main():
                 if doc["status"] != "pending":
                     continue
 
-                claimed = await claim_run(session, doc)
+                claimed = await claim_run(session, doc, couchdb_url)
                 if claimed:
-                    tasks.append(process_run(session, doc))
+                    tasks.append(process_run(session, doc, couchdb_url))
 
             if tasks:
                 await asyncio.gather(*tasks)
@@ -187,4 +232,15 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(
+        description="Archive runs and update CouchDB status from a YAML config file"
+    )
+    parser.add_argument(
+        "-c",
+        "--config-file",
+        default=str(CONFIG_DEFAULT_PATH),
+        help="Path to YAML config file containing statusdb credentials and URL",
+    )
+    args = parser.parse_args()
+
+    asyncio.run(main(Path(args.config_file)))
