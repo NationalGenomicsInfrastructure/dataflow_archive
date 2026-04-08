@@ -3,7 +3,7 @@ import asyncio
 import logging
 import os
 import socket
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -20,6 +20,9 @@ CONFIG_DEFAULT_PATH = Path(
         os.path.join(os.path.expanduser("~"), ".df_archive/df_archive.yaml"),
     )
 ).expanduser()
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("pipeline")
 
 
 def load_config(config_path: Path):
@@ -78,11 +81,6 @@ def build_couchdb_url(statusdb: dict) -> str:
     return f"{raw_url.rstrip('/')}/{database}"
 
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("pipeline")
-
-sem = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
-
 # ------------------------
 # CouchDB helpers
 # ------------------------
@@ -99,7 +97,7 @@ async def claim_run(session, doc, couchdb_url):
     updated = doc.copy()
     updated["status"] = "processing"
     updated["worker_id"] = WORKER_ID
-    updated["updated_at"] = datetime.now(datetime.timezone.utc).isoformat()
+    updated["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     url = f"{couchdb_url}/{doc['_id']}"
 
@@ -115,7 +113,7 @@ async def claim_run(session, doc, couchdb_url):
 
 async def update_status(session, doc, status, couchdb_url):
     doc["status"] = status
-    doc["updated_at"] = datetime.now(datetime.timezone.utc).isoformat()
+    doc["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     await session.put(f"{couchdb_url}/{doc['_id']}", json=doc)
 
@@ -178,7 +176,8 @@ async def validate_gpg(file_path: Path):
 
 
 async def process_run(session, doc, couchdb_url, destination_path: Path):
-    async with sem:
+    async with asyncio.Semaphore(MAX_CONCURRENT_JOBS):
+        log.info(f"Starting processing of run {doc['_id']} at {doc['path']}")
         run_path = Path(doc["path"])
 
         try:
@@ -207,31 +206,42 @@ async def scan_for_new_runs(
     ignore_dirs: list[str],
     final_files: list[str],
 ):
+    log.info(f"Scanning for new runs in {sequencing_path}")
     for sequencer_dir in sequencing_path.iterdir():
         if not sequencer_dir.is_dir():
+            log.info(f"Skipping non-directory {sequencer_dir}")
             continue
 
         for run_dir in sequencer_dir.iterdir():
             if not run_dir.is_dir():
+                log.info(f"Skipping non-directory {run_dir}")
                 continue
             if run_dir.name in ignore_dirs:
+                log.info(f"Skipping ignored directory {run_dir}")
                 continue
 
             # Check if any of the final files exist
             has_final_file = any((run_dir / f).exists() for f in final_files)
             if not has_final_file:
+                log.info(f"Skipping run directory {run_dir} without final files")
                 continue
 
             doc = {
                 "_id": run_dir.name,
                 "path": str(run_dir),
                 "status": "pending",
-                "created_at": datetime.now(datetime.timezone.utc).isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
 
             try:
-                await session.put(f"{couchdb_url}/{doc['_id']}", json=doc)
+                async with session.put(f"{couchdb_url}/{doc['_id']}", json=doc) as resp:
+                    if resp.status in (200, 201, 202):
+                        await resp.text()  # consume response to avoid warnings
+                    else:
+                        resp.raise_for_status()
+                log.info(f"Added new run to CouchDB: {doc['_id']} at {doc['path']}")
             except Exception:
+                log.info(f"Run {doc['_id']} already exists in CouchDB")
                 pass  # already exists
 
 
@@ -260,7 +270,7 @@ async def main(config_path: Path):
 
     couchdb_url = build_couchdb_url(statusdb_conf)
     auth = aiohttp.BasicAuth(statusdb_conf["username"], statusdb_conf["password"])
-
+    log.info(f"Using CouchDB URL: {couchdb_url}")
     async with aiohttp.ClientSession(auth=auth) as session:
         while True:
             await scan_for_new_runs(
@@ -276,16 +286,18 @@ async def main(config_path: Path):
             for doc in docs:
                 if doc["status"] != "pending":
                     continue
-
+                log.info(f"Found pending run: {doc['_id']} at {doc['path']}")
                 claimed = await claim_run(session, doc, couchdb_url)
                 if claimed:
+                    log.info(f"Claimed run {doc['_id']} for processing")
                     tasks.append(
                         process_run(session, doc, couchdb_url, destination_path)
                     )
 
             if tasks:
                 await asyncio.gather(*tasks)
-
+                log.info(f"Completed processing batch of {len(tasks)} runs")
+            log.info("Sleeping before next scan...")
             await asyncio.sleep(30)
 
 
@@ -300,5 +312,5 @@ if __name__ == "__main__":
         help="Path to YAML config file containing statusdb credentials and URL",
     )
     args = parser.parse_args()
-
+    log.info(f"Starting archive worker with config: {args.config_file}")
     asyncio.run(main(Path(args.config_file)))
