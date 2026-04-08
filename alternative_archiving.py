@@ -31,15 +31,7 @@ def load_config(config_path: Path):
     if not isinstance(config, dict):
         raise RuntimeError("Config file must contain a mapping")
 
-    statusdb = config.get("statusdb")
-    if not isinstance(statusdb, dict):
-        raise RuntimeError("Missing 'statusdb' section in config")
-
-    for key in ("username", "password", "url", "database"):
-        if not statusdb.get(key):
-            raise RuntimeError(f"Missing required statusdb config: {key}")
-
-    return statusdb
+    return config
 
 
 def build_couchdb_url(statusdb: dict) -> str:
@@ -203,9 +195,10 @@ async def scan_for_new_runs(session, couchdb_url):
 
 
 async def main(config_path: Path):
-    statusdb = load_config(config_path)
-    couchdb_url = build_couchdb_url(statusdb)
-    auth = aiohttp.BasicAuth(statusdb["username"], statusdb["password"])
+    conf = load_config(config_path)
+    statusdb_conf = conf.get("statusdb")
+    couchdb_url = build_couchdb_url(statusdb_conf)
+    auth = aiohttp.BasicAuth(statusdb_conf["username"], statusdb_conf["password"])
 
     async with aiohttp.ClientSession(auth=auth) as session:
         while True:
