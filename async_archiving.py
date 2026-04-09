@@ -69,6 +69,11 @@ def load_config(config_path: Path):
     }
 
 
+# ------------------------
+# CouchDB helpers
+# ------------------------
+
+
 def build_couchdb_url(statusdb: dict) -> str:
     raw_url = statusdb["url"].strip()
     if not raw_url:
@@ -81,19 +86,22 @@ def build_couchdb_url(statusdb: dict) -> str:
     return f"{raw_url.rstrip('/')}/{database}"
 
 
-# ------------------------
-# CouchDB helpers
-# ------------------------
-
-
 async def fetch_pending_runs(session, couchdb_url):
-    # simplistic: you'd normally use a view
-    async with session.get(couchdb_url) as resp:
+    """Fetch all runs with status 'pending' from CouchDB using the lookup design document view."""
+    view_url = f"{couchdb_url}/_design/lookup/_view/runfolder_id?include_docs=true"
+
+    async with session.get(view_url) as resp:
         data = await resp.json()
-        return data.get("rows", [])
+        rows = data.get("rows", [])
+        # Extract and filter for documents with pending status
+        pending_docs = [
+            row["doc"] for row in rows if row.get("doc", {}).get("status") == "pending"
+        ]
+        return pending_docs
 
 
 async def claim_run(session, doc, couchdb_url):
+    """Attempt to claim a run for processing by updating its status to 'processing' in CouchDB. Returns True if successful, False if another worker claimed it first."""
     updated = doc.copy()
     updated["status"] = "processing"
     updated["worker_id"] = WORKER_ID
@@ -124,6 +132,7 @@ async def update_status(session, doc, status, couchdb_url):
 
 
 async def run_pipeline(run_path: Path, destination_path: Path):
+    """Run the tar + gpg pipeline for a given run directory and return the path to the output GPG file."""
     output_file = destination_path / f"{run_path.name}.tar.gpg"
 
     tar_cmd = ["tar", "-cf", "-", "-C", str(run_path.parent), run_path.name]
@@ -131,7 +140,7 @@ async def run_pipeline(run_path: Path, destination_path: Path):
         "gpg",
         "--encrypt",
         "--recipient",
-        "your-key-id",
+        "your-key-id", #FIXME: 
         "--output",
         str(output_file),
     ]
@@ -156,6 +165,7 @@ async def run_pipeline(run_path: Path, destination_path: Path):
 
 
 async def validate_gpg(file_path: Path):
+    """Validate the GPG file by attempting to decrypt it (without actually writing the output)."""
     cmd = ["gpg", "--decrypt", str(file_path)]
 
     proc = await asyncio.create_subprocess_exec(
@@ -176,6 +186,7 @@ async def validate_gpg(file_path: Path):
 
 
 async def process_run(session, doc, couchdb_url, destination_path: Path):
+    """Process a single run: tar, encrypt, validate, and update status in CouchDB."""
     async with asyncio.Semaphore(MAX_CONCURRENT_JOBS):
         log.info(f"Starting processing of run {doc['_id']} at {doc['path']}")
         run_path = Path(doc["path"])
@@ -206,6 +217,7 @@ async def scan_for_new_runs(
     ignore_dirs: list[str],
     final_files: list[str],
 ):
+    """Scan the sequencing directory for new runs and add them to CouchDB if they are not already present."""
     log.info(f"Scanning for new runs in {sequencing_path}")
     for sequencer_dir in sequencing_path.iterdir():
         if not sequencer_dir.is_dir():
@@ -251,6 +263,7 @@ async def scan_for_new_runs(
 
 
 async def main(config_path: Path):
+    """Main loop: scan for new runs and process pending runs."""
     conf = load_config(config_path)
     statusdb_conf = conf["statusdb"]
     sequencing_path = Path(conf["sequencing_path"])
@@ -278,14 +291,12 @@ async def main(config_path: Path):
             )
 
             # fetch pending jobs
-            async with session.get(couchdb_url) as resp:
-                data = await resp.json()
-                docs = [row["doc"] for row in data.get("rows", [])]
+            docs = await fetch_pending_runs(session, couchdb_url)
+
+            log.info(f"Found {len(docs)} pending runs in CouchDB")
 
             tasks = []
             for doc in docs:
-                if doc["status"] != "pending":
-                    continue
                 log.info(f"Found pending run: {doc['_id']} at {doc['path']}")
                 claimed = await claim_run(session, doc, couchdb_url)
                 if claimed:
@@ -297,6 +308,9 @@ async def main(config_path: Path):
             if tasks:
                 await asyncio.gather(*tasks)
                 log.info(f"Completed processing batch of {len(tasks)} runs")
+            else:
+                log.info("No pending runs to process")
+
             log.info("Sleeping before next scan...")
             await asyncio.sleep(30)
 
