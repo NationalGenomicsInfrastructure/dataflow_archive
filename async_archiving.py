@@ -254,12 +254,12 @@ async def validate_gpg(file_path: Path):
         raise RuntimeError("GPG validation failed")
 
 
-async def encrypt_and_archive_key(key_file: Path, run_id: str, gpg_receiver: str):
+async def encrypt_and_archive_key(key_file: Path, gpg_receiver: str):
     """Encrypt the run key and archive it to ~/run_keys/."""
     keys_dir = Path.home() / "run_keys"
     keys_dir.mkdir(parents=True, exist_ok=True)
 
-    encrypted_key_path = keys_dir / f"{run_id}.key.gpg"
+    encrypted_key_path = keys_dir / (key_file.name + ".gpg")
 
     cmd = [
         "gpg",
@@ -307,7 +307,7 @@ async def process_run(
 
             # Encrypt and archive the key
             key_file = destination_path / f"{run_path.name}.key"
-            await encrypt_and_archive_key(key_file, doc["_id"], gpg_receiver)
+            await encrypt_and_archive_key(key_file, gpg_receiver)
 
             await update_status(session, doc, "done", couchdb_url)
             log.info(f"Completed {run_path}")
