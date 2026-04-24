@@ -309,7 +309,7 @@ async def process_run(
             key_file = destination_path / f"{run_path.name}.key"
             await encrypt_and_archive_key(key_file, gpg_receiver)
 
-            await update_status(session, doc, "done", couchdb_url)
+            await update_status(session, doc, "encrypted", couchdb_url)
             log.info(f"Completed {run_path}")
 
         except Exception as e:
