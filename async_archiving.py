@@ -54,11 +54,18 @@ def load_config(config_path: Path):
     if not isinstance(ignore_list, list):
         raise RuntimeError("Config entry 'ignore' must be a list")
 
+    tar_options = config.get("tar_options", [])
+    if tar_options is None:
+        tar_options = []
+    if not isinstance(tar_options, list):
+        raise RuntimeError("Config entry 'tar_options' must be a list")
+
     return {
         "statusdb": statusdb,
         "sequencing_path": sequencing_path,
         "destination_path": destination_path,
         "ignore": ignore_list,
+        "tar_options": tar_options,
     }
 
 
@@ -113,10 +120,26 @@ async def claim_run(session, doc, couchdb_url):
 
 
 async def update_status(session, doc, status, couchdb_url):
-    doc["status"] = status
-    doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+    """Update a run's status in CouchDB. Refetches the document to ensure we have the current _rev."""
+    # Refetch the document to get the latest _rev
+    async with session.get(f"{couchdb_url}/{doc['_id']}") as resp:
+        if resp.status != 200:
+            text = await resp.text()
+            raise RuntimeError(
+                f"Failed to fetch document for status update: {resp.status} {text}"
+            )
+        current_doc = await resp.json()
 
-    await session.put(f"{couchdb_url}/{doc['_id']}", json=doc)
+    # Update the status in the fetched document
+    current_doc["status"] = status
+    current_doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    async with session.put(f"{couchdb_url}/{doc['_id']}", json=current_doc) as resp:
+        if resp.status not in (200, 201, 202):
+            text = await resp.text()
+            raise RuntimeError(
+                f"Failed to update status to '{status}': {resp.status} {text}"
+            )
 
 
 # ------------------------
@@ -124,19 +147,38 @@ async def update_status(session, doc, status, couchdb_url):
 # ------------------------
 
 
-async def run_pipeline(run_path: Path, destination_path: Path):
+async def run_pipeline(run_path: Path, destination_path: Path, tar_options: list[str]):
     """Run the tar + gpg pipeline for a given run directory and return the path to the output GPG file."""
     output_file = destination_path / f"{run_path.name}.tar.gpg"
+    key_file = destination_path / f"{run_path.name}.key"
+    key_file.parent.mkdir(parents=True, exist_ok=True)
+    gen_key_cmd = ["gpg", "--gen-random", "1", "256"]
+    proc = await asyncio.create_subprocess_exec(
+        *gen_key_cmd,
+        stdout=asyncio.subprocess.PIPE,
+    )
+    key_data, _ = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"GPG key generation failed with code {proc.returncode}")
+    key_file.write_bytes(key_data)
 
-    tar_cmd = ["tar", "-cf", "-", "-C", str(run_path.parent), run_path.name]
+    tar_cmd = (
+        ["tar"] + tar_options + ["-cf", "-", "-C", str(run_path.parent), run_path.name]
+    )
     gpg_cmd = [
         "gpg",
-        "--encrypt",
-        "--recipient",
-        "your-key-id",  # FIXME:
+        "--symmetric",
+        "--cipher-algo",
+        "aes256",
+        "--passphrase-file",
+        str(key_file),
+        "--batch",
+        "--compress-algo",
+        "none",
         "--output",
         str(output_file),
     ]
+    # gpg --symmetric --cipher-algo aes256 --passphrase-file run_key_file --batch --compress-algo none -o {run.tar_encrypted} {run.tar}
 
     tar = await asyncio.create_subprocess_exec(
         *tar_cmd,
@@ -178,7 +220,19 @@ async def run_pipeline(run_path: Path, destination_path: Path):
 
 async def validate_gpg(file_path: Path):
     """Validate the GPG file by attempting to decrypt it (without actually writing the output)."""
-    cmd = ["gpg", "--decrypt", str(file_path)]
+    key_file = file_path.parent / (file_path.name.rsplit(".", 2)[0] + ".key")
+    cmd = [
+        "gpg",
+        "--decrypt",
+        "--cipher-algo",
+        "aes256",
+        "--passphrase-file",
+        str(key_file),
+        "--batch",
+        "--quiet",
+        str(file_path),
+    ]
+    # gpg --decrypt --cipher-algo aes256 --passphrase-file {run.key} --batch {run.tar_encrypted}
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -197,7 +251,9 @@ async def validate_gpg(file_path: Path):
 # ------------------------
 
 
-async def process_run(session, doc, couchdb_url, destination_path: Path):
+async def process_run(
+    session, doc, couchdb_url, destination_path: Path, tar_options: list[str]
+):
     """Process a single run: tar, encrypt, validate, and update status in CouchDB."""
     async with asyncio.Semaphore(MAX_CONCURRENT_JOBS):
         log.info(f"Starting processing of run {doc['_id']} at {doc['path']}")
@@ -206,7 +262,7 @@ async def process_run(session, doc, couchdb_url, destination_path: Path):
         try:
             log.info(f"Processing {run_path}")
 
-            output = await run_pipeline(run_path, destination_path)
+            output = await run_pipeline(run_path, destination_path, tar_options)
             await validate_gpg(output)
 
             await update_status(session, doc, "done", couchdb_url)
@@ -282,6 +338,7 @@ async def main(config_path: Path):
     sequencing_path = Path(conf["sequencing_path"])
     destination_path = Path(conf["destination_path"])
     ignore_dirs = conf["ignore"]
+    tar_options = conf["tar_options"]
     final_file = ".metadata_rsync_exitcode"
 
     if not sequencing_path.is_dir():
@@ -315,7 +372,9 @@ async def main(config_path: Path):
                 if claimed:
                     log.info(f"Claimed run {doc['_id']} for processing")
                     tasks.append(
-                        process_run(session, doc, couchdb_url, destination_path)
+                        process_run(
+                            session, doc, couchdb_url, destination_path, tar_options
+                        )
                     )
 
             if tasks:
