@@ -60,12 +60,17 @@ def load_config(config_path: Path):
     if not isinstance(tar_exclusions, list):
         raise RuntimeError("Config entry 'tar_exclusions' must be a list")
 
+    gpg_receiver = config.get("gpg_receiver")
+    if not gpg_receiver:
+        raise RuntimeError("Missing required config entry: gpg_receiver")
+
     return {
         "statusdb": statusdb,
         "sequencing_path": sequencing_path,
         "destination_path": destination_path,
         "ignore": ignore_list,
         "tar_exclusions": tar_exclusions,
+        "gpg_receiver": gpg_receiver,
     }
 
 
@@ -249,15 +254,47 @@ async def validate_gpg(file_path: Path):
         raise RuntimeError("GPG validation failed")
 
 
+async def encrypt_and_archive_key(key_file: Path, run_id: str, gpg_receiver: str):
+    """Encrypt the run key and archive it to ~/run_keys/."""
+    keys_dir = Path.home() / "run_keys"
+    keys_dir.mkdir(parents=True, exist_ok=True)
+
+    encrypted_key_path = keys_dir / f"{run_id}.key.gpg"
+
+    cmd = [
+        "gpg",
+        "--encrypt",
+        "-r",
+        gpg_receiver,
+        "--batch",
+        "--output",
+        str(encrypted_key_path),
+        str(key_file),
+    ]
+
+    proc = await asyncio.create_subprocess_exec(*cmd)
+    await proc.wait()
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"Failed to encrypt key: {proc.returncode}")
+
+    log.info(f"Encrypted key archived to {encrypted_key_path}")
+
+
 # ------------------------
 # Worker
 # ------------------------
 
 
 async def process_run(
-    session, doc, couchdb_url, destination_path: Path, tar_exclusions: list[str]
+    session,
+    doc,
+    couchdb_url,
+    destination_path: Path,
+    tar_exclusions: list[str],
+    gpg_receiver: str,
 ):
-    """Process a single run: tar, encrypt, validate, and update status in CouchDB."""
+    """Process a single run: tar, encrypt, validate, encrypt key, and update status in CouchDB."""
     async with asyncio.Semaphore(MAX_CONCURRENT_JOBS):
         log.info(f"Starting processing of run {doc['_id']} at {doc['path']}")
         run_path = Path(doc["path"])
@@ -267,6 +304,10 @@ async def process_run(
 
             output = await run_pipeline(run_path, destination_path, tar_exclusions)
             await validate_gpg(output)
+
+            # Encrypt and archive the key
+            key_file = destination_path / f"{run_path.name}.key"
+            await encrypt_and_archive_key(key_file, doc["_id"], gpg_receiver)
 
             await update_status(session, doc, "done", couchdb_url)
             log.info(f"Completed {run_path}")
@@ -342,6 +383,7 @@ async def main(config_path: Path):
     destination_path = Path(conf["destination_path"])
     ignore_dirs = conf["ignore"]
     tar_exclusions = conf["tar_exclusions"]
+    gpg_receiver = conf["gpg_receiver"]
     final_file = ".metadata_rsync_exitcode"
 
     if not sequencing_path.is_dir():
@@ -376,7 +418,12 @@ async def main(config_path: Path):
                     log.info(f"Claimed run {doc['_id']} for processing")
                     tasks.append(
                         process_run(
-                            session, doc, couchdb_url, destination_path, tar_exclusions
+                            session,
+                            doc,
+                            couchdb_url,
+                            destination_path,
+                            tar_exclusions,
+                            gpg_receiver,
                         )
                     )
 
