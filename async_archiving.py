@@ -54,18 +54,18 @@ def load_config(config_path: Path):
     if not isinstance(ignore_list, list):
         raise RuntimeError("Config entry 'ignore' must be a list")
 
-    tar_options = config.get("tar_options", [])
-    if tar_options is None:
-        tar_options = []
-    if not isinstance(tar_options, list):
-        raise RuntimeError("Config entry 'tar_options' must be a list")
+    tar_exclusions = config.get("tar_exclusions", [])
+    if tar_exclusions is None:
+        tar_exclusions = []
+    if not isinstance(tar_exclusions, list):
+        raise RuntimeError("Config entry 'tar_exclusions' must be a list")
 
     return {
         "statusdb": statusdb,
         "sequencing_path": sequencing_path,
         "destination_path": destination_path,
         "ignore": ignore_list,
-        "tar_options": tar_options,
+        "tar_exclusions": tar_exclusions,
     }
 
 
@@ -147,7 +147,9 @@ async def update_status(session, doc, status, couchdb_url):
 # ------------------------
 
 
-async def run_pipeline(run_path: Path, destination_path: Path, tar_options: list[str]):
+async def run_pipeline(
+    run_path: Path, destination_path: Path, tar_exclusions: list[str]
+):
     """Run the tar + gpg pipeline for a given run directory and return the path to the output GPG file."""
     output_file = destination_path / f"{run_path.name}.tar.gpg"
     key_file = destination_path / f"{run_path.name}.key"
@@ -162,9 +164,10 @@ async def run_pipeline(run_path: Path, destination_path: Path, tar_options: list
         raise RuntimeError(f"GPG key generation failed with code {proc.returncode}")
     key_file.write_bytes(key_data)
 
-    tar_cmd = (
-        ["tar"] + tar_options + ["-cf", "-", "-C", str(run_path.parent), run_path.name]
-    )
+    tar_cmd = ["tar"]
+    for excl in tar_exclusions:
+        tar_cmd.extend(["--exclude", excl])
+    tar_cmd.extend(["-cf", "-", "-C", str(run_path.parent), run_path.name])
     gpg_cmd = [
         "gpg",
         "--symmetric",
@@ -252,7 +255,7 @@ async def validate_gpg(file_path: Path):
 
 
 async def process_run(
-    session, doc, couchdb_url, destination_path: Path, tar_options: list[str]
+    session, doc, couchdb_url, destination_path: Path, tar_exclusions: list[str]
 ):
     """Process a single run: tar, encrypt, validate, and update status in CouchDB."""
     async with asyncio.Semaphore(MAX_CONCURRENT_JOBS):
@@ -262,7 +265,7 @@ async def process_run(
         try:
             log.info(f"Processing {run_path}")
 
-            output = await run_pipeline(run_path, destination_path, tar_options)
+            output = await run_pipeline(run_path, destination_path, tar_exclusions)
             await validate_gpg(output)
 
             await update_status(session, doc, "done", couchdb_url)
@@ -338,7 +341,7 @@ async def main(config_path: Path):
     sequencing_path = Path(conf["sequencing_path"])
     destination_path = Path(conf["destination_path"])
     ignore_dirs = conf["ignore"]
-    tar_options = conf["tar_options"]
+    tar_exclusions = conf["tar_exclusions"]
     final_file = ".metadata_rsync_exitcode"
 
     if not sequencing_path.is_dir():
@@ -373,7 +376,7 @@ async def main(config_path: Path):
                     log.info(f"Claimed run {doc['_id']} for processing")
                     tasks.append(
                         process_run(
-                            session, doc, couchdb_url, destination_path, tar_options
+                            session, doc, couchdb_url, destination_path, tar_exclusions
                         )
                     )
 
