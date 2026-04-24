@@ -54,18 +54,11 @@ def load_config(config_path: Path):
     if not isinstance(ignore_list, list):
         raise RuntimeError("Config entry 'ignore' must be a list")
 
-    final_files = config.get("final_files", [])
-    if final_files is None:
-        final_files = []
-    if not isinstance(final_files, list):
-        raise RuntimeError("Config entry 'final_files' must be a list")
-
     return {
         "statusdb": statusdb,
         "sequencing_path": sequencing_path,
         "destination_path": destination_path,
         "ignore": ignore_list,
-        "final_files": final_files,
     }
 
 
@@ -140,7 +133,7 @@ async def run_pipeline(run_path: Path, destination_path: Path):
         "gpg",
         "--encrypt",
         "--recipient",
-        "your-key-id", #FIXME: 
+        "your-key-id",  # FIXME:
         "--output",
         str(output_file),
     ]
@@ -152,14 +145,33 @@ async def run_pipeline(run_path: Path, destination_path: Path):
 
     gpg = await asyncio.create_subprocess_exec(
         *gpg_cmd,
-        stdin=tar.stdout,
+        stdin=asyncio.subprocess.PIPE,
     )
 
-    await gpg.wait()
-    await tar.wait()
+    # Pipe tar's output to gpg's input
+    try:
+        while True:
+            chunk = await tar.stdout.read(8192)
+            if not chunk:
+                break
+            gpg.stdin.write(chunk)
+            await gpg.stdin.drain()
+    except Exception as e:
+        log.error(f"Error piping data: {e}")
+        gpg.stdin.close() if gpg.stdin else None
+        await gpg.terminate()
+        raise
+    finally:
+        gpg.stdin.close()
+        await gpg.stdin.wait_closed()
 
-    if gpg.returncode != 0 or tar.returncode != 0:
-        raise RuntimeError("Tar/GPG pipeline failed")
+    await tar.wait()
+    await gpg.wait()
+
+    if tar.returncode != 0 or gpg.returncode != 0:
+        raise RuntimeError(
+            f"Tar/GPG pipeline failed: tar={tar.returncode}, gpg={gpg.returncode}"
+        )
 
     return output_file
 
@@ -215,7 +227,7 @@ async def scan_for_new_runs(
     couchdb_url,
     sequencing_path: Path,
     ignore_dirs: list[str],
-    final_files: list[str],
+    final_file: str,
 ):
     """Scan the sequencing directory for new runs and add them to CouchDB if they are not already present."""
     log.info(f"Scanning for new runs in {sequencing_path}")
@@ -232,10 +244,11 @@ async def scan_for_new_runs(
                 log.info(f"Skipping ignored directory {run_dir}")
                 continue
 
-            # Check if any of the final files exist
-            has_final_file = any((run_dir / f).exists() for f in final_files)
-            if not has_final_file:
-                log.info(f"Skipping run directory {run_dir} without final files")
+            # Check if the final file exists
+            if not (run_dir / final_file).exists():
+                log.info(
+                    f"Skipping run directory {run_dir} without final file {final_file}"
+                )
                 continue
 
             doc = {
@@ -269,7 +282,7 @@ async def main(config_path: Path):
     sequencing_path = Path(conf["sequencing_path"])
     destination_path = Path(conf["destination_path"])
     ignore_dirs = conf["ignore"]
-    final_files = conf["final_files"]
+    final_file = ".metadata_rsync_exitcode"
 
     if not sequencing_path.is_dir():
         raise RuntimeError(
@@ -287,7 +300,7 @@ async def main(config_path: Path):
     async with aiohttp.ClientSession(auth=auth) as session:
         while True:
             await scan_for_new_runs(
-                session, couchdb_url, sequencing_path, ignore_dirs, final_files
+                session, couchdb_url, sequencing_path, ignore_dirs, final_file
             )
 
             # fetch pending jobs
