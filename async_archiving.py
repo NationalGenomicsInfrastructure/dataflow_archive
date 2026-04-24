@@ -279,6 +279,8 @@ async def encrypt_and_archive_key(key_file: Path, gpg_receiver: str):
         raise RuntimeError(f"Failed to encrypt key: {proc.returncode}")
 
     log.info(f"Encrypted key archived to {encrypted_key_path}")
+    # delete the unencrypted key file after encryption
+    key_file.unlink()
 
 
 # ------------------------
