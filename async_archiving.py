@@ -300,15 +300,21 @@ async def process_run(
     async with asyncio.Semaphore(MAX_CONCURRENT_JOBS):
         log.info(f"Starting processing of run {doc['_id']} at {doc['path']}")
         run_path = Path(doc["path"])
+        run_id = doc["_id"]
+
+        # Track generated files for cleanup on failure
+        output_file = None
+        encrypted_key_file = None
 
         try:
             log.info(f"Processing {run_path}")
 
-            output = await run_pipeline(run_path, destination_path, tar_exclusions)
-            await validate_gpg(output)
+            output_file = await run_pipeline(run_path, destination_path, tar_exclusions)
+            await validate_gpg(output_file)
 
             # Encrypt and archive the key
             key_file = destination_path / f"{run_path.name}.key"
+            encrypted_key_file = Path.home() / "run_keys" / f"{run_id}.key.gpg"
             await encrypt_and_archive_key(key_file, gpg_receiver)
 
             await update_status(session, doc, "encrypted", couchdb_url)
@@ -316,6 +322,16 @@ async def process_run(
 
         except Exception as e:
             log.exception(f"Failed {run_path}: {e}")
+
+            # Clean up generated files on failure
+            if output_file and output_file.exists():
+                output_file.unlink()
+                log.info(f"Cleaned up output file: {output_file}")
+
+            if encrypted_key_file and encrypted_key_file.exists():
+                encrypted_key_file.unlink()
+                log.info(f"Cleaned up encrypted key file: {encrypted_key_file}")
+
             await update_status(session, doc, "failed", couchdb_url)
 
 
