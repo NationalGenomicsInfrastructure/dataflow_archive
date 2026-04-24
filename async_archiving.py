@@ -11,6 +11,7 @@ import aiohttp
 import yaml
 
 MAX_CONCURRENT_JOBS = 2
+MAX_RETRIES = 3
 
 WORKER_ID = socket.gethostname()
 
@@ -147,9 +148,39 @@ async def update_status(session, doc, status, couchdb_url):
             )
 
 
-# ------------------------
-# Core pipeline
-# ------------------------
+async def handle_failure(session, doc, couchdb_url):
+    """Increment failure_count on the document. Reset status to 'pending' for retry,
+    or set to 'failed' if MAX_RETRIES is exceeded."""
+    # Refetch to get latest _rev and current failure count
+    async with session.get(f"{couchdb_url}/{doc['_id']}") as resp:
+        if resp.status != 200:
+            text = await resp.text()
+            raise RuntimeError(
+                f"Failed to fetch document for failure update: {resp.status} {text}"
+            )
+        current_doc = await resp.json()
+
+    failure_count = current_doc.get("failure_count", 0) + 1
+    current_doc["failure_count"] = failure_count
+    current_doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    if failure_count >= MAX_RETRIES:
+        current_doc["status"] = "failed"
+        log.warning(
+            f"Run {doc['_id']} has failed {failure_count} times, marking as failed"
+        )
+    else:
+        current_doc["status"] = "pending"
+        log.info(
+            f"Run {doc['_id']} failed (attempt {failure_count}/{MAX_RETRIES}), resetting to pending for retry"
+        )
+
+    async with session.put(f"{couchdb_url}/{doc['_id']}", json=current_doc) as resp:
+        if resp.status not in (200, 201, 202):
+            text = await resp.text()
+            raise RuntimeError(
+                f"Failed to update document after failure: {resp.status} {text}"
+            )
 
 
 async def run_pipeline(
@@ -332,7 +363,7 @@ async def process_run(
                 encrypted_key_file.unlink()
                 log.info(f"Cleaned up encrypted key file: {encrypted_key_file}")
 
-            await update_status(session, doc, "failed", couchdb_url)
+            await handle_failure(session, doc, couchdb_url)
 
 
 # ------------------------
