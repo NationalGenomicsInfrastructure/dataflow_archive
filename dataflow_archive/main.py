@@ -114,7 +114,9 @@ async def fetch_pending_runs(session, couchdb_url):
             log.debug(f"Fetched {len(rows)} rows from CouchDB view")
             # Extract and filter for documents with pending status
             pending_docs = [
-                row["doc"] for row in rows if row.get("doc", {}).get("status") == "pending"
+                row["doc"]
+                for row in rows
+                if row.get("doc", {}).get("status") == "pending"
             ]
             return pending_docs
     except aiohttp.ClientError as e:
@@ -240,6 +242,11 @@ async def reset_stale_processing_runs(session, couchdb_url):
             log.error(f"Failed to reset stale run {doc['_id']}: {e}")
 
 
+# ------------------------
+# Pipeline steps
+# ------------------------
+
+
 async def run_pipeline(
     run_path: Path, destination_path: Path, tar_exclusions: list[str]
 ):
@@ -276,7 +283,6 @@ async def run_pipeline(
         "--output",
         str(output_file),
     ]
-    # gpg --symmetric --cipher-algo aes256 --passphrase-file run_key_file --batch --compress-algo none -o {run.tar_encrypted} {run.tar}
     log.info(f"Starting tar+gpg pipeline: {run_path} -> {output_file}")
     tar = await asyncio.create_subprocess_exec(
         *tar_cmd,
@@ -332,7 +338,6 @@ async def validate_gpg(file_path: Path):
         "--quiet",
         str(file_path),
     ]
-    # gpg --decrypt --cipher-algo aes256 --passphrase-file {run.key} --batch {run.tar_encrypted}
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -478,9 +483,13 @@ async def scan_for_new_runs(
                 async with session.put(f"{couchdb_url}/{doc['_id']}", json=doc) as resp:
                     if resp.status in (200, 201, 202):
                         await resp.text()  # consume response to avoid warnings
-                        log.info(f"Added new run to CouchDB: {doc['_id']} at {doc['path']}")
+                        log.info(
+                            f"Added new run to CouchDB: {doc['_id']} at {doc['path']}"
+                        )
                     elif resp.status == 409:
-                        log.debug(f"Run {doc['_id']} already exists in CouchDB, skipping")
+                        log.debug(
+                            f"Run {doc['_id']} already exists in CouchDB, skipping"
+                        )
                     else:
                         text = await resp.text()
                         log.error(
