@@ -105,6 +105,7 @@ async def fetch_pending_runs(session, couchdb_url):
     async with session.get(view_url) as resp:
         data = await resp.json()
         rows = data.get("rows", [])
+        log.debug(f"Fetched {len(rows)} rows from CouchDB view")
         # Extract and filter for documents with pending status
         pending_docs = [
             row["doc"] for row in rows if row.get("doc", {}).get("status") == "pending"
@@ -123,8 +124,12 @@ async def claim_run(session, doc, couchdb_url):
 
     async with session.put(url, json=updated) as resp:
         if resp.status == 409:
+            log.warning(
+                f"Lost race to claim run {doc['_id']}, another worker claimed it first"
+            )
             return False  # lost the race
         elif resp.status in (200, 201, 202):
+            log.info(f"Claimed run {doc['_id']} on worker {WORKER_ID}")
             return True
         else:
             text = await resp.text()
@@ -152,6 +157,7 @@ async def update_status(session, doc, status, couchdb_url):
             raise RuntimeError(
                 f"Failed to update status to '{status}': {resp.status} {text}"
             )
+        log.info(f"Run {doc['_id']}: status updated to '{status}'")
 
 
 async def handle_failure(session, doc, couchdb_url):
@@ -196,6 +202,7 @@ async def run_pipeline(
     output_file = destination_path / f"{run_path.name}.tar.gpg"
     key_file = destination_path / f"{run_path.name}.key"
     key_file.parent.mkdir(parents=True, exist_ok=True)
+    log.info(f"Generating encryption key for {run_path.name}")
     gen_key_cmd = ["gpg", "--gen-random", "1", "256"]
     proc = await asyncio.create_subprocess_exec(
         *gen_key_cmd,
@@ -205,6 +212,7 @@ async def run_pipeline(
     if proc.returncode != 0:
         raise RuntimeError(f"GPG key generation failed with code {proc.returncode}")
     key_file.write_bytes(key_data)
+    log.debug(f"Encryption key written to {key_file}")
 
     tar_cmd = ["tar"]
     for excl in tar_exclusions:
@@ -224,7 +232,7 @@ async def run_pipeline(
         str(output_file),
     ]
     # gpg --symmetric --cipher-algo aes256 --passphrase-file run_key_file --batch --compress-algo none -o {run.tar_encrypted} {run.tar}
-
+    log.info(f"Starting tar+gpg pipeline: {run_path} -> {output_file}")
     tar = await asyncio.create_subprocess_exec(
         *tar_cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -260,11 +268,13 @@ async def run_pipeline(
             f"Tar/GPG pipeline failed: tar={tar.returncode}, gpg={gpg.returncode}"
         )
 
+    log.info(f"Pipeline complete: {output_file} ({output_file.stat().st_size} bytes)")
     return output_file
 
 
 async def validate_gpg(file_path: Path):
     """Validate the GPG file by attempting to decrypt it (without actually writing the output)."""
+    log.info(f"Validating encrypted archive: {file_path.name}")
     key_file = file_path.parent / (file_path.name.rsplit(".", 2)[0] + ".key")
     cmd = [
         "gpg",
@@ -290,6 +300,8 @@ async def validate_gpg(file_path: Path):
     if proc.returncode != 0:
         raise RuntimeError("GPG validation failed")
 
+    log.info(f"Validation successful: {file_path.name}")
+
 
 async def encrypt_and_archive_key(key_file: Path, gpg_receiver: str):
     """Encrypt the run key and archive it to ~/run_keys/."""
@@ -297,7 +309,7 @@ async def encrypt_and_archive_key(key_file: Path, gpg_receiver: str):
     keys_dir.mkdir(parents=True, exist_ok=True)
 
     encrypted_key_path = keys_dir / (key_file.name + ".gpg")
-
+    log.info(f"Encrypting key {key_file.name} for recipient {gpg_receiver}")
     cmd = [
         "gpg",
         "--encrypt",
@@ -344,8 +356,6 @@ async def process_run(
         encrypted_key_file = None
 
         try:
-            log.info(f"Processing {run_path}")
-
             output_file = await run_pipeline(run_path, destination_path, tar_exclusions)
             await validate_gpg(output_file)
 
@@ -388,21 +398,21 @@ async def scan_for_new_runs(
     log.info(f"Scanning for new runs in {sequencing_path}")
     for sequencer_dir in sequencing_path.iterdir():
         if not sequencer_dir.is_dir():
-            log.info(f"Skipping non-directory {sequencer_dir}")
+            log.debug(f"Skipping non-directory {sequencer_dir}")
             continue
 
         for run_dir in sequencer_dir.iterdir():
             if not run_dir.is_dir():
-                log.info(f"Skipping non-directory {run_dir}")
+                log.debug(f"Skipping non-directory {run_dir}")
                 continue
             if run_dir.name in ignore_dirs:
-                log.info(f"Skipping ignored directory {run_dir}")
+                log.debug(f"Skipping ignored directory {run_dir}")
                 continue
 
             # Check if the final file exists
             if not (run_dir / final_file).exists():
-                log.info(
-                    f"Skipping run directory {run_dir} without final file {final_file}"
+                log.debug(
+                    f"Skipping {run_dir.name}: final file '{final_file}' not present"
                 )
                 continue
 
@@ -421,8 +431,7 @@ async def scan_for_new_runs(
                         resp.raise_for_status()
                 log.info(f"Added new run to CouchDB: {doc['_id']} at {doc['path']}")
             except Exception:
-                log.info(f"Run {doc['_id']} already exists in CouchDB")
-                pass  # already exists
+                log.debug(f"Run {doc['_id']} already exists in CouchDB, skipping")
 
 
 # ------------------------
@@ -452,7 +461,6 @@ async def main(conf: dict):
 
     couchdb_url = build_couchdb_url(statusdb_conf)
     auth = aiohttp.BasicAuth(statusdb_conf["username"], statusdb_conf["password"])
-    log.info(f"Using CouchDB URL: {couchdb_url}")
     async with aiohttp.ClientSession(auth=auth) as session:
         while True:
             await scan_for_new_runs(
@@ -469,7 +477,6 @@ async def main(conf: dict):
                 log.info(f"Found pending run: {doc['_id']} at {doc['path']}")
                 claimed = await claim_run(session, doc, couchdb_url)
                 if claimed:
-                    log.info(f"Claimed run {doc['_id']} for processing")
                     tasks.append(
                         process_run(
                             session,
