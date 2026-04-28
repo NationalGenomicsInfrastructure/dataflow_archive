@@ -443,18 +443,28 @@ async def scan_for_new_runs(
 async def main(conf: dict):
     """Main loop: scan for new runs and process pending runs."""
     shutdown_event = asyncio.Event()
+    active_tasks: set[asyncio.Task] = set()
 
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(
-            sig,
-            lambda s=sig: (
-                log.warning(
-                    f"Received signal {s.name}, shutting down after current work completes..."
-                ),
-                shutdown_event.set(),
-            ),
+
+    def force_cancel():
+        log.warning(
+            f"Received second signal, cancelling {len(active_tasks)} active task(s) immediately..."
         )
+        for t in active_tasks:
+            t.cancel()
+
+    def graceful_shutdown(sig):
+        log.warning(
+            f"Received {sig.name}, shutting down after current work completes..."
+            " (press Ctrl+C again to cancel immediately)"
+        )
+        shutdown_event.set()
+        # Re-register SIGINT so a second Ctrl+C triggers force-cancel
+        loop.add_signal_handler(signal.SIGINT, force_cancel)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda s=sig: graceful_shutdown(s))
 
     statusdb_conf = conf["statusdb"]
     sequencing_path = Path(conf["sequencing_path"])
@@ -487,12 +497,11 @@ async def main(conf: dict):
 
             log.info(f"Found {len(docs)} pending runs in CouchDB")
 
-            tasks = []
             for doc in docs:
                 log.info(f"Found pending run: {doc['_id']} at {doc['path']}")
                 claimed = await claim_run(session, doc, couchdb_url)
                 if claimed:
-                    tasks.append(
+                    task = asyncio.create_task(
                         process_run(
                             session,
                             doc,
@@ -502,10 +511,12 @@ async def main(conf: dict):
                             gpg_receiver,
                         )
                     )
+                    active_tasks.add(task)
+                    task.add_done_callback(active_tasks.discard)
 
-            if tasks:
-                await asyncio.gather(*tasks)
-                log.info(f"Completed processing batch of {len(tasks)} runs")
+            if active_tasks:
+                await asyncio.gather(*active_tasks, return_exceptions=True)
+                log.info(f"Completed processing batch of {len(active_tasks)} runs")
             else:
                 log.info("No pending runs to process")
 
