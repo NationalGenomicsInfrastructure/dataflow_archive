@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import logging
 import os
+import signal
 import socket
 from datetime import datetime, timezone
 from pathlib import Path
@@ -327,7 +328,7 @@ async def encrypt_and_archive_key(key_file: Path, gpg_receiver: str):
     if proc.returncode != 0:
         raise RuntimeError(f"Failed to encrypt key: {proc.returncode}")
 
-    log.info(f"Encrypted key archived to {encrypted_key_path}")
+    log.info(f"Encrypted key generated in {encrypted_key_path}")
     # delete the unencrypted key file after encryption
     key_file.unlink()
 
@@ -441,6 +442,20 @@ async def scan_for_new_runs(
 
 async def main(conf: dict):
     """Main loop: scan for new runs and process pending runs."""
+    shutdown_event = asyncio.Event()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(
+            sig,
+            lambda s=sig: (
+                log.warning(
+                    f"Received signal {s.name}, shutting down after current work completes..."
+                ),
+                shutdown_event.set(),
+            ),
+        )
+
     statusdb_conf = conf["statusdb"]
     sequencing_path = Path(conf["sequencing_path"])
     destination_path = Path(conf["destination_path"])
@@ -462,7 +477,7 @@ async def main(conf: dict):
     couchdb_url = build_couchdb_url(statusdb_conf)
     auth = aiohttp.BasicAuth(statusdb_conf["username"], statusdb_conf["password"])
     async with aiohttp.ClientSession(auth=auth) as session:
-        while True:
+        while not shutdown_event.is_set():
             await scan_for_new_runs(
                 session, couchdb_url, sequencing_path, ignore_dirs, final_file
             )
@@ -494,8 +509,16 @@ async def main(conf: dict):
             else:
                 log.info("No pending runs to process")
 
+            if shutdown_event.is_set():
+                break
+
             log.info("Sleeping before next scan...")
-            await asyncio.sleep(30)
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                pass  # normal wake-up, continue the loop
+
+    log.info("Shutdown complete")
 
 
 if __name__ == "__main__":
