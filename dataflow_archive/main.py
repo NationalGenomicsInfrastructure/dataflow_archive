@@ -595,7 +595,8 @@ async def main(conf: dict):
     log.info("Shutdown complete")
 
 
-if __name__ == "__main__":
+def cli():
+    """Entry point for the archive worker script."""
     parser = argparse.ArgumentParser(
         description="Archive runs and update CouchDB status from a YAML config file"
     )
