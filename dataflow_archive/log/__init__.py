@@ -21,7 +21,7 @@ ROOT_LOG.setLevel(logging.INFO)
 
 # Console logger with session_id in format
 formatter = logging.Formatter(
-    "%(asctime)s - %(session_id)s - %(name)s - %(levelname)s - %(message)s"
+    "%(asctime)s - %(session_id)s - %(levelname)s - %(message)s"
 )
 stream_handler = logging.StreamHandler()
 stream_handler.setFormatter(formatter)

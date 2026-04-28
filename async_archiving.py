@@ -10,6 +10,10 @@ from urllib.parse import urlparse
 import aiohttp
 import yaml
 
+from dataflow_archive.log import init_logger_file
+
+log = logging.getLogger(__name__)
+
 MAX_CONCURRENT_JOBS = 2
 MAX_RETRIES = 3
 
@@ -22,9 +26,6 @@ CONFIG_DEFAULT_PATH = Path(
     )
 ).expanduser()
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("pipeline")
-
 
 def load_config(config_path: Path):
     with config_path.open() as file:
@@ -32,6 +33,10 @@ def load_config(config_path: Path):
 
     if not isinstance(config, dict):
         raise RuntimeError("Config file must contain a mapping")
+
+    log_file = config.get("log_file")
+    if log_file and not isinstance(log_file, str):
+        raise RuntimeError("Config entry 'log_file' must be a string")
 
     statusdb = config.get("statusdb")
     if not isinstance(statusdb, dict):
@@ -66,6 +71,7 @@ def load_config(config_path: Path):
         raise RuntimeError("Missing required config entry: gpg_receiver")
 
     return {
+        "log_file": log_file,
         "statusdb": statusdb,
         "sequencing_path": sequencing_path,
         "destination_path": destination_path,
@@ -424,9 +430,8 @@ async def scan_for_new_runs(
 # ------------------------
 
 
-async def main(config_path: Path):
+async def main(conf: dict):
     """Main loop: scan for new runs and process pending runs."""
-    conf = load_config(config_path)
     statusdb_conf = conf["statusdb"]
     sequencing_path = Path(conf["sequencing_path"])
     destination_path = Path(conf["destination_path"])
@@ -497,5 +502,13 @@ if __name__ == "__main__":
         help="Path to YAML config file containing statusdb credentials and URL",
     )
     args = parser.parse_args()
+
+    # Load config and set up logging before starting main loop
+    conf = load_config(Path(args.config_file))
+    log_file = conf.get("log_file")
+    if log_file:
+        log_level = conf.get("log_level", "INFO")
+        init_logger_file(log_file, log_level)
+
     log.info(f"Starting archive worker with config: {args.config_file}")
-    asyncio.run(main(Path(args.config_file)))
+    asyncio.run(main(conf))
