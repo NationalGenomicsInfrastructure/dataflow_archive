@@ -103,15 +103,23 @@ async def fetch_pending_runs(session, couchdb_url):
     """Fetch all runs with status 'pending' from CouchDB using the lookup design document view."""
     view_url = f"{couchdb_url}/_design/lookup/_view/runfolder_id?include_docs=true"
 
-    async with session.get(view_url) as resp:
-        data = await resp.json()
-        rows = data.get("rows", [])
-        log.debug(f"Fetched {len(rows)} rows from CouchDB view")
-        # Extract and filter for documents with pending status
-        pending_docs = [
-            row["doc"] for row in rows if row.get("doc", {}).get("status") == "pending"
-        ]
-        return pending_docs
+    try:
+        async with session.get(view_url) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                log.error(f"Failed to fetch pending runs: {resp.status} {text}")
+                return []
+            data = await resp.json()
+            rows = data.get("rows", [])
+            log.debug(f"Fetched {len(rows)} rows from CouchDB view")
+            # Extract and filter for documents with pending status
+            pending_docs = [
+                row["doc"] for row in rows if row.get("doc", {}).get("status") == "pending"
+            ]
+            return pending_docs
+    except aiohttp.ClientError as e:
+        log.error(f"Network error fetching pending runs: {e}")
+        return []
 
 
 async def claim_run(session, doc, couchdb_url):
@@ -194,6 +202,42 @@ async def handle_failure(session, doc, couchdb_url):
             raise RuntimeError(
                 f"Failed to update document after failure: {resp.status} {text}"
             )
+
+
+async def reset_stale_processing_runs(session, couchdb_url):
+    """On startup, reset any runs stuck in 'processing' by this worker back to 'pending'.
+    This handles the case where the script was interrupted or crashed mid-run."""
+    view_url = f"{couchdb_url}/_design/lookup/_view/runfolder_id?include_docs=true"
+    try:
+        async with session.get(view_url) as resp:
+            if resp.status != 200:
+                log.error(f"Could not check for stale runs on startup: {resp.status}")
+                return
+            data = await resp.json()
+    except aiohttp.ClientError as e:
+        log.error(f"Network error checking for stale runs on startup: {e}")
+        return
+
+    stale = [
+        row["doc"]
+        for row in data.get("rows", [])
+        if row.get("doc", {}).get("status") == "processing"
+        and row.get("doc", {}).get("worker_id") == WORKER_ID
+    ]
+
+    if not stale:
+        log.info("No stale processing runs found on startup")
+        return
+
+    log.warning(
+        f"Found {len(stale)} stale run(s) stuck in 'processing', resetting to 'pending'"
+    )
+    for doc in stale:
+        try:
+            await update_status(session, doc, "pending", couchdb_url)
+            log.info(f"Reset stale run {doc['_id']} to 'pending'")
+        except Exception as e:
+            log.error(f"Failed to reset stale run {doc['_id']}: {e}")
 
 
 async def run_pipeline(
@@ -345,15 +389,17 @@ async def process_run(
     destination_path: Path,
     tar_exclusions: list[str],
     gpg_receiver: str,
+    semaphore: asyncio.Semaphore,
 ):
     """Process a single run: tar, encrypt, validate, encrypt key, and update status in CouchDB."""
-    async with asyncio.Semaphore(MAX_CONCURRENT_JOBS):
+    async with semaphore:
         log.info(f"Starting processing of run {doc['_id']} at {doc['path']}")
         run_path = Path(doc["path"])
         run_id = doc["_id"]
 
-        # Track generated files for cleanup on failure
+        # Track all generated files for cleanup on failure or cancellation
         output_file = None
+        key_file = destination_path / f"{run_path.name}.key"  # created by run_pipeline
         encrypted_key_file = None
 
         try:
@@ -361,24 +407,28 @@ async def process_run(
             await validate_gpg(output_file)
 
             # Encrypt and archive the key
-            key_file = destination_path / f"{run_path.name}.key"
             encrypted_key_file = Path.home() / "run_keys" / f"{run_id}.key.gpg"
             await encrypt_and_archive_key(key_file, gpg_receiver)
 
             await update_status(session, doc, "encrypted", couchdb_url)
             log.info(f"Completed {run_path}")
 
+        except asyncio.CancelledError:
+            log.warning(f"Run {run_path} was cancelled, cleaning up partial files")
+            for f in (output_file, key_file, encrypted_key_file):
+                if f and f.exists():
+                    f.unlink()
+                    log.info(f"Cleaned up {f}")
+            raise  # propagate; run stays 'processing' until next startup reset
+
         except Exception as e:
             log.exception(f"Failed {run_path}: {e}")
 
             # Clean up generated files on failure
-            if output_file and output_file.exists():
-                output_file.unlink()
-                log.info(f"Cleaned up output file: {output_file}")
-
-            if encrypted_key_file and encrypted_key_file.exists():
-                encrypted_key_file.unlink()
-                log.info(f"Cleaned up encrypted key file: {encrypted_key_file}")
+            for f in (output_file, key_file, encrypted_key_file):
+                if f and f.exists():
+                    f.unlink()
+                    log.info(f"Cleaned up {f}")
 
             await handle_failure(session, doc, couchdb_url)
 
@@ -428,11 +478,16 @@ async def scan_for_new_runs(
                 async with session.put(f"{couchdb_url}/{doc['_id']}", json=doc) as resp:
                     if resp.status in (200, 201, 202):
                         await resp.text()  # consume response to avoid warnings
+                        log.info(f"Added new run to CouchDB: {doc['_id']} at {doc['path']}")
+                    elif resp.status == 409:
+                        log.debug(f"Run {doc['_id']} already exists in CouchDB, skipping")
                     else:
-                        resp.raise_for_status()
-                log.info(f"Added new run to CouchDB: {doc['_id']} at {doc['path']}")
-            except Exception:
-                log.debug(f"Run {doc['_id']} already exists in CouchDB, skipping")
+                        text = await resp.text()
+                        log.error(
+                            f"Failed to add run {doc['_id']} to CouchDB: {resp.status} {text}"
+                        )
+            except aiohttp.ClientError as e:
+                log.error(f"Network error adding run {doc['_id']} to CouchDB: {e}")
 
 
 # ------------------------
@@ -466,6 +521,7 @@ async def main(conf: dict):
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda s=sig: graceful_shutdown(s))
 
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
     statusdb_conf = conf["statusdb"]
     sequencing_path = Path(conf["sequencing_path"])
     destination_path = Path(conf["destination_path"])
@@ -486,11 +542,16 @@ async def main(conf: dict):
 
     couchdb_url = build_couchdb_url(statusdb_conf)
     auth = aiohttp.BasicAuth(statusdb_conf["username"], statusdb_conf["password"])
-    async with aiohttp.ClientSession(auth=auth) as session:
+    timeout = aiohttp.ClientTimeout(total=60)
+    async with aiohttp.ClientSession(auth=auth, timeout=timeout) as session:
+        await reset_stale_processing_runs(session, couchdb_url)
         while not shutdown_event.is_set():
-            await scan_for_new_runs(
-                session, couchdb_url, sequencing_path, ignore_dirs, final_file
-            )
+            try:
+                await scan_for_new_runs(
+                    session, couchdb_url, sequencing_path, ignore_dirs, final_file
+                )
+            except Exception as e:
+                log.error(f"Error scanning for new runs: {e}")
 
             # fetch pending jobs
             docs = await fetch_pending_runs(session, couchdb_url)
@@ -509,14 +570,16 @@ async def main(conf: dict):
                             destination_path,
                             tar_exclusions,
                             gpg_receiver,
+                            semaphore,
                         )
                     )
                     active_tasks.add(task)
                     task.add_done_callback(active_tasks.discard)
 
             if active_tasks:
+                batch_size = len(active_tasks)
                 await asyncio.gather(*active_tasks, return_exceptions=True)
-                log.info(f"Completed processing batch of {len(active_tasks)} runs")
+                log.info(f"Completed processing batch of {batch_size} runs")
             else:
                 log.info("No pending runs to process")
 
