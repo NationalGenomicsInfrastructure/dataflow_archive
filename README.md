@@ -32,7 +32,7 @@ pip install -e .
 
 ## Configuration
 
-The worker reads a YAML config file. The default path is `~/.df_archive/df_archive.yaml`, overridable with the `ARCHIVE_CONFIG` environment variable or the `-c` flag.
+The worker reads a YAML config file. The default path is `~/conf/df_archive.yaml`, overridable with the `ARCHIVE_CONFIG` environment variable or the `-c` flag.
 
 ```yaml
 statusdb:
