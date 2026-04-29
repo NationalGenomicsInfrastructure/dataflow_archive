@@ -23,7 +23,7 @@ WORKER_ID = socket.gethostname()
 CONFIG_DEFAULT_PATH = Path(
     os.environ.get(
         "ARCHIVE_CONFIG",
-        os.path.join(os.path.expanduser("~"), ".df_archive/df_archive.yaml"),
+        os.path.join(os.path.expanduser("~"), "conf/df_archive.yaml"),
     )
 ).expanduser()
 
