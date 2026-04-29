@@ -93,7 +93,7 @@ def build_couchdb_url(statusdb: dict) -> str:
         raise RuntimeError("statusdb.url must not be empty")
 
     if not urlparse(raw_url).scheme:
-        raw_url = f"http://{raw_url}"
+        raw_url = f"https://{raw_url}"
 
     database = statusdb["database"].strip().lstrip("/")
     return f"{raw_url.rstrip('/')}/{database}"
