@@ -101,7 +101,7 @@ def build_couchdb_url(statusdb: dict) -> str:
 
 async def fetch_pending_runs(session, couchdb_url):
     """Fetch all runs with status 'pending' from CouchDB using the lookup design document view."""
-    view_url = f"{couchdb_url}/_design/lookup/_view/runfolder_id?include_docs=true"
+    view_url = f"{couchdb_url}/_design/lookup/_view/pending_runs?include_docs=true"  # view should emit rows for docs with status 'pending'
 
     try:
         async with session.get(view_url) as resp:
@@ -113,11 +113,7 @@ async def fetch_pending_runs(session, couchdb_url):
             rows = data.get("rows", [])
             log.debug(f"Fetched {len(rows)} rows from CouchDB view")
             # Extract and filter for documents with pending status
-            pending_docs = [
-                row["doc"]
-                for row in rows
-                if row.get("doc", {}).get("status") == "pending"
-            ]
+            pending_docs = [row["doc"] for row in rows]
             return pending_docs
     except aiohttp.ClientError as e:
         log.error(f"Network error fetching pending runs: {e}")
