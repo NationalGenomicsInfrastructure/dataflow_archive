@@ -304,8 +304,9 @@ async def run_pipeline(
             await gpg.stdin.drain()
     except Exception as e:
         log.error(f"Error piping data: {e}")
-        gpg.stdin.close() if gpg.stdin else None
-        await gpg.terminate()
+        if gpg.returncode is None:
+            gpg.terminate()
+            await gpg.wait()
         raise
     finally:
         gpg.stdin.close()
