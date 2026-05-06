@@ -564,30 +564,41 @@ async def main(conf: dict):
 
             log.info(f"Found {len(docs)} pending runs in CouchDB")
 
-            for doc in docs:
-                log.info(f"Found pending run: {doc['_id']} at {doc['path']}")
-                claimed = await claim_run(session, doc, couchdb_url)
-                if claimed:
-                    task = asyncio.create_task(
-                        process_run(
-                            session,
-                            doc,
-                            couchdb_url,
-                            destination_path,
-                            tar_exclusions,
-                            gpg_receiver,
-                            semaphore,
-                        )
-                    )
-                    active_tasks.add(task)
-                    task.add_done_callback(active_tasks.discard)
+            # Process runs, picking up new ones as slots become available
+            docs_queue = list(docs)
 
-            if active_tasks:
-                batch_size = len(active_tasks)
-                await asyncio.gather(*active_tasks, return_exceptions=True)
-                log.info(f"Completed processing batch of {batch_size} runs")
-            else:
-                log.info("No pending runs to process")
+            while docs_queue or active_tasks:
+                if shutdown_event.is_set():
+                    break
+
+                # Fill available slots with new jobs
+                while len(active_tasks) < MAX_CONCURRENT_JOBS and docs_queue:
+                    doc = docs_queue.pop(0)
+                    log.info(f"Found pending run: {doc['_id']} at {doc['path']}")
+                    claimed = await claim_run(session, doc, couchdb_url)
+                    if claimed:
+                        task = asyncio.create_task(
+                            process_run(
+                                session,
+                                doc,
+                                couchdb_url,
+                                destination_path,
+                                tar_exclusions,
+                                gpg_receiver,
+                                semaphore,
+                            )
+                        )
+                        active_tasks.add(task)
+                        task.add_done_callback(active_tasks.discard)
+
+                if not active_tasks:
+                    break
+
+                # Wait for any task to complete so we can pick up the next one
+                done, pending = await asyncio.wait(
+                    active_tasks, return_when=asyncio.FIRST_COMPLETED
+                )
+                log.info(f"Completed {len(done)} task(s), {len(pending)} still running")
 
             if shutdown_event.is_set():
                 break
