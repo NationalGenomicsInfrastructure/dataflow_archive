@@ -1,171 +1,136 @@
-# Dataflow Archive
+# dataflow_archive
 
-A Python application for automating the archiving of sequencing data.
+An async worker that scans sequencing run directories, encrypts them with GPG, and tracks progress via CouchDB.
 
 ## Overview
 
-Dataflow Archive monitors sequencing run directories and orchestrates the encryption and archiving of sequencing data. It supports multiple sequencer types (Illumina, Oxford Nanopore and Element) and logs archiving completion in a CouchDB-based status database.
+The worker runs in a continuous loop:
 
-## Supported Sequencers
+1. **Scan** — walks the sequencing directory tree looking for completed runs (indicated by the presence of a sentinel file)
+2. **Register** — new runs are added to CouchDB with status `pending`
+3. **Claim** — the worker atomically claims a pending run to prevent other workers from processing it simultaneously
+4. **Archive** — the run directory is packed with `tar` and symmetrically encrypted with GPG using a randomly generated 256-bit key
+5. **Validate** — the encrypted archive is test-decrypted to verify integrity
+6. **Secure key** — the encryption key is asymmetrically encrypted to a configured GPG recipient and stored in `~/run_keys/`, then the plaintext key is deleted
+7. **Update status** — the CouchDB document is updated to `encrypted`
 
-- **Illumina**: NextSeq, MiSeqi100, NovaSeqXPlus, MiSeq
-- **Oxford Nanopore (ONT)**: PromethION, MinION
-- **Element**: AVITI
+On failure a run is reset to `pending` for retry. After 3 failed attempts it is marked `failed`.
+
+## Requirements
+
+- Python ≥ 3.14
+- `gpg` available on `PATH`
+- `tar` available on `PATH`
+- A running CouchDB instance with a `_design/lookup/_view/runfolder_id` view
+- The GPG recipient key imported into the worker's keyring
 
 ## Installation
-
-### Requirements
-
-- Python 3.14+
-- Dependencies listed in [pyproject.toml](pyproject.toml):
-  - PyYAML
-  - click
-  - ibmcloudant
-- [run-one](https://launchpad.net/ubuntu/+source/run-one)
-
-### Setup suggestions
-
-1. Clone the repository:
-
-```bash
-git clone <repository-url>
-cd dataflow_archive
-```
-
-2. Install the package:
 
 ```bash
 pip install -e .
 ```
 
-Or with development dependencies:
+## Configuration
+
+The worker reads a YAML config file. The default path is `~/conf/df_archive.yaml`, overridable with the `ARCHIVE_CONFIG` environment variable or the `-c` flag.
+
+```yaml
+statusdb:
+  username: myuser
+  password: mypassword
+  url: url
+  database: archiving_status
+
+sequencing_path: /data/sequencing    # top-level directory; subdirs are per-sequencer
+destination_path: /data/archives     # where .tar.gpg and .key files are written
+
+gpg_receiver: user       # GPG key ID or email for key encryption
+
+ignore:                              # optional: run directory names to skip
+  - nosync
+  - transferring
+
+tar_exclusions:                      # optional: patterns passed to tar --exclude
+  - "Demultiplex*"
+  - "demux_*"
+
+log_file: /var/log/dataflow_archive.log   # optional: write logs to file
+log_level: INFO                           # optional: DEBUG, INFO, WARN, ERROR (default: INFO)
+```
+
+### Directory layout expected under `sequencing_path`
+
+```
+sequencing_path/
+  sequencer_A/
+    run_001/
+      .metadata_rsync_exitcode    ← sentinel file; run is picked up only when this exists
+      ...
+    run_002/
+      ...
+  sequencer_B/
+    ...
+```
+
+## Usage
+
+```bash
+# Use the default config path
+dataflow_archive
+
+# Specify a config file explicitly
+dataflow_archive -c /path/to/config.yaml
+```
+
+### Shutdown
+
+| Input | Behaviour |
+|-------|-----------|
+| **Ctrl+C** (first) | Graceful — finishes any runs currently in progress, then exits |
+| **Ctrl+C** (second) | Immediate — cancels in-progress tasks, cleans up partial files, then exits |
+| **SIGTERM** | Same as first Ctrl+C |
+
+## CouchDB document schema
+
+Each run is stored as a document with `_id` set to the run directory name:
+
+```json
+{
+  "_id": "run_001",
+  "path": "/data/sequencing/sequencer_A/run_001",
+  "status": "pending",
+  "worker_id": "hostname",
+  "failure_count": 0,
+  "created_at": "2026-04-28T10:00:00+00:00",
+  "updated_at": "2026-04-28T10:05:00+00:00"
+}
+```
+
+| Status | Meaning |
+|--------|---------|
+| `pending` | Waiting to be processed (or reset after a recoverable failure) |
+| `processing` | Currently being archived by a worker |
+| `encrypted` | Successfully archived and validated |
+| `failed` | Failed more than 3 times; requires manual intervention |
+
+## Output files
+
+| File | Location | Description |
+|------|----------|-------------|
+| `<run>.tar.gpg` | `destination_path/` | AES-256 symmetrically encrypted tar archive |
+| `<run>.key` | `destination_path/` | Plaintext encryption key (deleted after key encryption step) |
+| `<run_id>.key.gpg` | `~/run_keys/` | Encryption key, asymmetrically encrypted to `gpg_receiver` |
+
+## Development
+
+Install dev dependencies:
 
 ```bash
 pip install -e ".[dev]"
 ```
 
-## Usage
-
-### Command Line Interface
-
-```bash
-dataflow_archive [OPTIONS] COMMAND
-```
-
-#### Options
-
-- `-c, --config-file PATH`: Path to configuration YAML file. Defaults to `~/.df_archive/df_archive.yaml`. Can also be set via `ARCHIVE_CONFIG` environment variable.
-- `-r, --run RUN_ID`: Archive a specific run (e.g., `20250528_LH00217_0219_A22TT52LT4`).
-- `--version`: Show version and exit.
-
-#### Commands
-
-- `encrypt`: Tar and encrypt run directories based on the provided configuration.
-- `upload`: Upload encrypted runs to PDC.
-
-#### Examples
-
-```bash
-# Encrypt all runs (uses configuration for sequencing directories)
-dataflow_archive encrypt
-
-# Encrypt a specific run
-dataflow_archive --run 20250528_LH00217_0219_A22TT52LT4 encrypt
-
-# Upload all encrypted runs
-dataflow_archive upload
-
-# Upload a specific run
-dataflow_archive --run 20250528_LH00217_0219_A22TT52LT4 upload
-
-# Use a custom config file
-dataflow_archive --config-file /path/to/config.yaml encrypt
-```
-
-## Configuration
-
-Create a YAML configuration file with the following structure:
-
-```yaml
-log:
-  file: /path/to/dataflow_archive.log
-
-statusdb:
-  username: couchdb_user
-  password: couchdb_password
-  url: couchdb.host.com
-  database: sequencing_runs
-
-data_dirs:
-  - /sequencing/MiSeqi100
-  - /sequencing/NextSeq/Runs
-  - /sequencing/PromethION
-ignore_folders:
-  - nosync
-archive_dir: /sequencing/archiving
-sequencer_specific_settings:
-  Illumina:
-    tar_exclude:
-      - Demultiplex*
-    final_file:
-      - CopyComplete.txt
-  ONT:
-    tar_exclude:
-      - Pod5*
-    final_file:
-      - final_summary.txt
-  # ... additional sequencer configurations
-```
-
-## Assumptions
-
-- Run directories are named according to sequencer-specific ID formats (defined in RUN_TYPES)
-- Final completion is indicated by the presence of a sequencer-specific final file (e.g. `CopyComplete.txt` for Illumina)
-- CouchDB is accessible and the database exists
-
-### Status Files
-
-The logic of the script relies on the following status files:
-
-- `run.inal_file` - The final file written by each sequencing machine. Used to indicate when the sequencing has completed.
-
-## Development
-
-### Running Tests
-
-```bash
-pytest
-```
-
-With coverage:
-
-```bash
-pytest --cov --cov-branch
-```
-
-### Code Quality
-
-Run linting and formatting checks:
+Run linting:
 
 ```bash
 ruff check .
-ruff format --check .
 ```
-
-### Project Structure
-
-```
-dataflow_archive/
-├── cli.py                 # Command-line interface
-├── dataflow_archive.py    # Main transfer orchestration
-├── log/                   # Logging utilities
-├── utils/                 # Utility modules (filesystem, statusdb)
-└── tests/                 # Unit tests
-```
-
-### Adding a new sequencer
-
-To add support for a new sequencer, add the following to dataflow_transfer:
-
-1. Update the RUN_TYPES dictionary to cover the format of the new run folder name
-4. Add entries for the sequencer in the config file (`data_dirs` and any nessesary changes/additions to `sequencer_specific_settings`)

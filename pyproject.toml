@@ -29,8 +29,7 @@ readme = "README.md"
 
 requires-python = ">=3.14"
 dependencies = [
-    "click",
-    "ibmcloudant",
+    "aiohttp>=3.13.5",
     "pyYAML",
 ]
 
@@ -43,7 +42,7 @@ dev = [
 ]
 
 [project.scripts]
-dataflow_archive = "dataflow_archive.cli:cli"
+dataflow_archive = "dataflow_archive.main:cli"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
