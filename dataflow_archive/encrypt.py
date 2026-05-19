@@ -1,7 +1,6 @@
 import argparse
 import asyncio
 import logging
-import os
 import signal
 import socket
 from datetime import datetime, timezone
@@ -9,9 +8,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import aiohttp
-import yaml
 
 from dataflow_archive.log import init_logger_file
+from dataflow_archive.utils.utils import CONFIG_DEFAULT_PATH, load_config
 
 log = logging.getLogger(__name__)
 
@@ -19,67 +18,6 @@ MAX_CONCURRENT_JOBS = 2
 MAX_RETRIES = 3
 
 WORKER_ID = socket.gethostname()
-
-CONFIG_DEFAULT_PATH = Path(
-    os.environ.get(
-        "ARCHIVE_CONFIG",
-        os.path.join(os.path.expanduser("~"), "conf/df_archive.yaml"),
-    )
-).expanduser()
-
-
-def load_config(config_path: Path):
-    with config_path.open() as file:
-        config = yaml.safe_load(file)
-
-    if not isinstance(config, dict):
-        raise RuntimeError("Config file must contain a mapping")
-
-    log_file = config.get("log_file")
-    if log_file and not isinstance(log_file, str):
-        raise RuntimeError("Config entry 'log_file' must be a string")
-
-    statusdb = config.get("statusdb")
-    if not isinstance(statusdb, dict):
-        raise RuntimeError("Missing 'statusdb' section in config")
-
-    for key in ("username", "password", "url", "database"):
-        if not statusdb.get(key):
-            raise RuntimeError(f"Missing required statusdb config: {key}")
-
-    sequencing_path = config.get("sequencing_path")
-    if not sequencing_path:
-        raise RuntimeError("Missing required config entry: sequencing_path")
-
-    destination_path = config.get("destination_path")
-    if not destination_path:
-        raise RuntimeError("Missing required config entry: destination_path")
-
-    ignore_list = config.get("ignore", [])
-    if ignore_list is None:
-        ignore_list = []
-    if not isinstance(ignore_list, list):
-        raise RuntimeError("Config entry 'ignore' must be a list")
-
-    tar_exclusions = config.get("tar_exclusions", [])
-    if tar_exclusions is None:
-        tar_exclusions = []
-    if not isinstance(tar_exclusions, list):
-        raise RuntimeError("Config entry 'tar_exclusions' must be a list")
-
-    gpg_receiver = config.get("gpg_receiver")
-    if not gpg_receiver:
-        raise RuntimeError("Missing required config entry: gpg_receiver")
-
-    return {
-        "log_file": log_file,
-        "statusdb": statusdb,
-        "sequencing_path": sequencing_path,
-        "destination_path": destination_path,
-        "ignore": ignore_list,
-        "tar_exclusions": tar_exclusions,
-        "gpg_receiver": gpg_receiver,
-    }
 
 
 # ------------------------
@@ -613,9 +551,9 @@ async def main(conf: dict):
 
 
 def cli():
-    """Entry point for the archive worker script."""
+    """Entry point for the archive encryption script."""
     parser = argparse.ArgumentParser(
-        description="Archive runs and update CouchDB status from a YAML config file"
+        description="Encrypt runs and update CouchDB status"
     )
     parser.add_argument(
         "-c",
@@ -632,5 +570,5 @@ def cli():
         log_level = conf.get("log_level", "INFO")
         init_logger_file(log_file, log_level)
 
-    log.info(f"Starting archive worker with config: {args.config_file}")
+    log.info(f"Starting encryption worker with config: {args.config_file}")
     asyncio.run(main(conf))
