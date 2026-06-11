@@ -67,25 +67,24 @@ def collect_runs_to_archive(conf, couchdb_url, auth):
 
 def upload_to_pdc(run, conf):
     """Upload the run's tar.gpg and key files to PDC using dsmc."""
-    # Upload the tar.gpg with "dsmc archive run.tar.gpg"
     gpg_file = Path(conf["destination_path"]) / f"{run}.tar.gpg"
     try:
         subprocess.run(["dsmc", "archive", str(gpg_file)], check=True)
     except subprocess.CalledProcessError as e:
         log.error(f"Error uploading archive file for run {run}: {e}")
         return False
-    # sleep 15 seconds to ensure file is fully written and closed before upload
-    sleep(15)
-    # Upload the key file in ~/run_keys with "dsmc archive key file"
+
+    sleep(15)  # ensure file is fully written and closed before next upload
+
     key_file = Path.home() / "run_keys" / f"{run}.key.gpg"
     try:
         subprocess.run(["dsmc", "archive", str(key_file)], check=True)
     except subprocess.CalledProcessError as e:
         log.error(f"Error uploading key file for run {run}: {e}")
         return False
-    # sleep 5 seconds to ensure file is fully written and closed before upload
-    sleep(5)
-    # Check that files are archived using "dsmc query archive run.tar.gpg" and "dsmc query archive key file"
+
+    sleep(5)  # ensure file is fully written and closed before verification
+
     try:
         result = subprocess.run(
             ["dsmc", "query", "archive", str(gpg_file)],
@@ -118,9 +117,21 @@ def upload_to_pdc(run, conf):
 
 
 def update_status(run, status, couchdb_url, auth):
-    # Update statusdb document for run with new status
-    # Use CouchDB _update handler or PUT to update document
-    pass
+    # Fetch current document for run from CouchDB
+    response = requests.get(f"{couchdb_url}/{run}", auth=auth, timeout=30)
+    if response.status_code != 200:
+        log.error(f"Failed to fetch document for run {run}: {response.status_code}")
+        return
+    doc = response.json()
+    doc["status"] = status
+    try:
+        response = requests.put(f"{couchdb_url}/{run}", json=doc, auth=auth, timeout=30)
+        if response.status_code != 201:
+            log.error(f"Failed to update document for run {run}: {response.status_code}")
+    except requests.RequestException as e:
+        log.error(f"Error updating document for run {run}: {e}")
+        return False
+    return True
 
 
 def delete_archived_files(run, conf):
@@ -149,8 +160,8 @@ def main(conf):
     for run in runs_to_archive:
         if upload_to_pdc(run, conf):
             log.info(f"Successfully archived run {run}")
-            update_status(run, "archived", couchdb_url, auth)
-            delete_archived_files(run, conf)
+            if update_status(run, "archived", couchdb_url, auth):
+                delete_archived_files(run, conf)
         else:
             log.error(f"Failed to archive run {run}")
             update_status(run, "archiving_failed", couchdb_url, auth)
