@@ -5,7 +5,6 @@ import signal
 import socket
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
 
 import aiohttp
 
