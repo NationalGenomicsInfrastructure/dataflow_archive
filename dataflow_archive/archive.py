@@ -18,8 +18,7 @@ def collect_runs_to_archive(conf, couchdb_url, auth):
     1. Fetching encrypted runs from statusdb view
     2. Looking for tar.gpg files in destination_path
     3. Checking that the corresponding key files exist in ~/run_keys/
-    4. Checking that they are not in PDC
-    5. Returning list of runs to archive
+    4. Returning list of runs to archive
     """
     runs_to_archive = []
     destination_path = Path(conf["destination_path"])
@@ -73,22 +72,43 @@ def upload_to_pdc(run, conf):
     return True
 
 
+def update_status(run, status, couchdb_url, auth):
+    # Update statusdb document for run with new status
+    # Use CouchDB _update handler or PUT to update document
+    pass
+
+
+def delete_archived_files(run, conf):
+    """Delete local tar.gpg and key files for the run after successful upload to PDC"""
+    destination_path = Path(conf["destination_path"])
+    gpg_file = destination_path / f"{run}.tar.gpg"
+    key_file = Path.home() / "run_keys" / f"{run}.key.gpg"
+
+    try:
+        if gpg_file.exists():
+            gpg_file.unlink()
+            log.info(f"Deleted local archive file: {gpg_file}")
+        if key_file.exists():
+            key_file.unlink()
+            log.info(f"Deleted local key file: {key_file}")
+    except Exception as e:
+        log.error(f"Error deleting archived files for run {run}: {e}")
+
+
 def main(conf):
     statusdb_conf = conf["statusdb"]
     couchdb_url = build_couchdb_url(statusdb_conf)
     auth = (statusdb_conf["username"], statusdb_conf["password"])
 
-    # Collect runs to archive
     runs_to_archive = collect_runs_to_archive(conf, couchdb_url, auth)
-    # For each run:
     for run in runs_to_archive:
         if upload_to_pdc(run, conf):
             log.info(f"Successfully archived run {run}")
-            # Update statusdb to "archived"
-            # Remove local tar.gpg and key files if upload successful
+            update_status(run, "archived", couchdb_url, auth)
+            delete_archived_files(run, conf)
         else:
             log.error(f"Failed to archive run {run}")
-            # Update statusdb to "archive_failed"
+            update_status(run, "archiving_failed", couchdb_url, auth)
 
 
 def cli():
