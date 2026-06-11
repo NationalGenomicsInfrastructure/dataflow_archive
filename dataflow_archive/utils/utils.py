@@ -1,6 +1,8 @@
 import os
-import yaml
 from pathlib import Path
+from urllib.parse import urlparse
+
+import yaml
 
 CONFIG_DEFAULT_PATH = Path(
     os.environ.get(
@@ -61,3 +63,14 @@ def load_config(config_path: Path):
         "tar_exclusions": tar_exclusions,
         "gpg_receiver": gpg_receiver,
     }
+    
+def build_couchdb_url(statusdb: dict) -> str:
+    raw_url = statusdb["url"].strip()
+    if not raw_url:
+        raise RuntimeError("statusdb.url must not be empty")
+
+    if not urlparse(raw_url).scheme:
+        raw_url = f"https://{raw_url}"
+
+    database = statusdb["database"].strip().lstrip("/")
+    return f"{raw_url.rstrip('/')}/{database}"

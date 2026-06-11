@@ -1,28 +1,18 @@
 import argparse
 from pathlib import Path
-from urllib.parse import urlparse
 
 import requests
 
 from dataflow_archive.log import ROOT_LOG as log
 from dataflow_archive.log import init_logger_file
-from dataflow_archive.utils.utils import CONFIG_DEFAULT_PATH, load_config
+from dataflow_archive.utils.utils import (
+    CONFIG_DEFAULT_PATH,
+    build_couchdb_url,
+    load_config,
+)
 
 
-def build_couchdb_url(statusdb: dict) -> str:
-    """Construct the full CouchDB URL from statusdb config."""
-    raw_url = statusdb["url"].strip()
-    if not raw_url:
-        raise RuntimeError("statusdb.url must not be empty")
-
-    if not urlparse(raw_url).scheme:
-        raw_url = f"https://{raw_url}"
-
-    database = statusdb["database"].strip().lstrip("/")
-    return f"{raw_url.rstrip('/')}/{database}"
-
-
-def collect_runs_to_archive(conf):
+def collect_runs_to_archive(conf, couchdb_url, auth):
     """
     Collect runs to archive by:
     1. Looking for tar.gpg files in destination_path
@@ -33,12 +23,8 @@ def collect_runs_to_archive(conf):
     """
     runs_to_archive = []
     destination_path = Path(conf["destination_path"])
-    statusdb_conf = conf["statusdb"]
 
     try:
-        couchdb_url = build_couchdb_url(statusdb_conf)
-        auth = (statusdb_conf["username"], statusdb_conf["password"])
-
         # Find all tar.gpg files in destination_path
         for gpg_file in destination_path.glob("*.tar.gpg"):
             run_id = gpg_file.name.replace(".tar.gpg", "")
@@ -101,8 +87,12 @@ def upload_to_pdc(run, conf):
 
 
 def main(conf):
+    statusdb_conf = conf["statusdb"]
+    couchdb_url = build_couchdb_url(statusdb_conf)
+    auth = (statusdb_conf["username"], statusdb_conf["password"])
+
     # Collect runs to archive
-    runs_to_archive = collect_runs_to_archive(conf)
+    runs_to_archive = collect_runs_to_archive(conf, couchdb_url, auth)
     # For each run:
     for run in runs_to_archive:
         if upload_to_pdc(run, conf):

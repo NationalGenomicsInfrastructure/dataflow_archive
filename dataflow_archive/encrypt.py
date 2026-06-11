@@ -10,7 +10,11 @@ from urllib.parse import urlparse
 import aiohttp
 
 from dataflow_archive.log import init_logger_file
-from dataflow_archive.utils.utils import CONFIG_DEFAULT_PATH, load_config
+from dataflow_archive.utils.utils import (
+    CONFIG_DEFAULT_PATH,
+    build_couchdb_url,
+    load_config,
+)
 
 log = logging.getLogger(__name__)
 
@@ -23,18 +27,6 @@ WORKER_ID = socket.gethostname()
 # ------------------------
 # CouchDB helpers
 # ------------------------
-
-
-def build_couchdb_url(statusdb: dict) -> str:
-    raw_url = statusdb["url"].strip()
-    if not raw_url:
-        raise RuntimeError("statusdb.url must not be empty")
-
-    if not urlparse(raw_url).scheme:
-        raw_url = f"https://{raw_url}"
-
-    database = statusdb["database"].strip().lstrip("/")
-    return f"{raw_url.rstrip('/')}/{database}"
 
 
 async def fetch_pending_runs(session, couchdb_url):
