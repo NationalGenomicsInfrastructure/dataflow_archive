@@ -1,5 +1,7 @@
 import argparse
+import subprocess
 from pathlib import Path
+from time import sleep
 
 import requests
 
@@ -64,11 +66,54 @@ def collect_runs_to_archive(conf, couchdb_url, auth):
 
 
 def upload_to_pdc(run, conf):
-    # Use dsmc to upload file and key files to PDC
-    # Return True if upload successful, False otherwise
-    ## dsmc archive gpg file (sleep 15)
-    ## dsmc archive key file (sleep 5)
-    ## Check that files are archived
+    """Upload the run's tar.gpg and key files to PDC using dsmc."""
+    # Upload the tar.gpg with "dsmc archive run.tar.gpg"
+    gpg_file = Path(conf["destination_path"]) / f"{run}.tar.gpg"
+    try:
+        subprocess.run(["dsmc", "archive", str(gpg_file)], check=True)
+    except subprocess.CalledProcessError as e:
+        log.error(f"Error uploading archive file for run {run}: {e}")
+        return False
+    # sleep 15 seconds to ensure file is fully written and closed before upload
+    sleep(15)
+    # Upload the key file in ~/run_keys with "dsmc archive key file"
+    key_file = Path.home() / "run_keys" / f"{run}.key.gpg"
+    try:
+        subprocess.run(["dsmc", "archive", str(key_file)], check=True)
+    except subprocess.CalledProcessError as e:
+        log.error(f"Error uploading key file for run {run}: {e}")
+        return False
+    # sleep 5 seconds to ensure file is fully written and closed before upload
+    sleep(5)
+    # Check that files are archived using "dsmc query archive run.tar.gpg" and "dsmc query archive key file"
+    try:
+        result = subprocess.run(
+            ["dsmc", "query", "archive", str(gpg_file)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        if "Archived" not in result.stdout:
+            log.error(f"Archive file for run {run} not found in PDC after upload")
+            return False
+    except subprocess.CalledProcessError as e:
+        log.error(f"Error querying archive file for run {run}: {e}")
+        return False
+
+    try:
+        result = subprocess.run(
+            ["dsmc", "query", "archive", str(key_file)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        if "Archived" not in result.stdout:
+            log.error(f"Key file for run {run} not found in PDC after upload")
+            return False
+    except subprocess.CalledProcessError as e:
+        log.error(f"Error querying key file for run {run}: {e}")
+        return False
+
     return True
 
 
