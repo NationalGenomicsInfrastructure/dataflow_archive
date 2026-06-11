@@ -15,9 +15,9 @@ from dataflow_archive.utils.utils import (
 def collect_runs_to_archive(conf, couchdb_url, auth):
     """
     Collect runs to archive by:
-    1. Looking for tar.gpg files in destination_path
-    2. Checking that the corresponding key files exist in ~/run_keys/
-    3. Checking that they have "encrypted" status in statusdb
+    1. Fetching encrypted runs from statusdb view
+    2. Looking for tar.gpg files in destination_path
+    3. Checking that the corresponding key files exist in ~/run_keys/
     4. Checking that they are not in PDC
     5. Returning list of runs to archive
     """
@@ -25,6 +25,22 @@ def collect_runs_to_archive(conf, couchdb_url, auth):
     destination_path = Path(conf["destination_path"])
 
     try:
+        view_url = (
+            f"{couchdb_url}/_design/lookup/_view/encrypted_runs?include_docs=true"
+        )
+        resp = requests.get(view_url, auth=auth, timeout=30)
+        if resp.status_code != 200:
+            log.error(f"Failed to fetch encrypted runs view: {resp.status_code}")
+            return runs_to_archive
+
+        rows = resp.json().get("rows", [])
+        encrypted_runs = {}
+        for row in rows:
+            doc = row.get("doc", {})
+            run_id = doc.get("_id")
+            if run_id:
+                encrypted_runs[run_id] = doc
+
         # Find all tar.gpg files in destination_path
         for gpg_file in destination_path.glob("*.tar.gpg"):
             run_id = gpg_file.name.replace(".tar.gpg", "")
@@ -35,43 +51,14 @@ def collect_runs_to_archive(conf, couchdb_url, auth):
                 log.debug(f"Skipping {run_id}: key file not found at {key_file}")
                 continue
 
-            # Check that the run has "encrypted" status in statusdb
-            try:
-                resp = requests.get(f"{couchdb_url}/{run_id}", auth=auth, timeout=30)
-
-                if resp.status_code == 404:
-                    log.debug(f"Skipping {run_id}: not found in statusdb")
-                    continue
-
-                if resp.status_code != 200:
-                    log.warning(
-                        f"Failed to fetch status for {run_id}: {resp.status_code}"
-                    )
-                    continue
-
-                doc = resp.json()
-                status = doc.get("status")
-
-                # Check that it's encrypted (not archived, not failed, etc.)
-                if status != "encrypted":
-                    log.debug(
-                        f"Skipping {run_id}: status is '{status}', not 'encrypted'"
-                    )
-                    continue
-
-                # Check that it's not already in PDC (check if in_pdc field exists and is True)
-                if doc.get("in_pdc", False):
-                    log.debug(f"Skipping {run_id}: already marked as in PDC")
-                    continue
-
-                log.info(f"Found run eligible for archiving: {run_id}")
-                runs_to_archive.append(run_id)
-
-            except requests.RequestException as e:
-                log.error(f"Error checking status for {run_id}: {e}")
+            if not encrypted_runs.get(run_id):
+                log.debug(f"Skipping {run_id}: not present in encrypted_runs view")
                 continue
 
-    except Exception as e:
+            log.info(f"Found run eligible for archiving: {run_id}")
+            runs_to_archive.append(run_id)
+
+    except (requests.RequestException, ValueError) as e:
         log.error(f"Error collecting runs to archive: {e}")
 
     return runs_to_archive
