@@ -194,9 +194,7 @@ def main(conf):
         # This prevents a re-run from uploading the same run again if status update
         # failed after a previous successful upload.
         if not update_status(run, "archiving", couchdb_url, auth):
-            log.warning(
-                f"Could not set status to 'archiving' for run {run}, skipping"
-            )
+            log.warning(f"Could not set status to 'archiving' for run {run}, skipping")
             continue
 
         # Phase 2: upload and then record the outcome.
@@ -205,8 +203,10 @@ def main(conf):
             if update_status(run, "archived", couchdb_url, auth):
                 delete_archived_files(run, conf)
             else:
-                log.error(f"Failed to update status to 'archived' for run {run}")
-                update_status(run, "archiving_failed", couchdb_url, auth)
+                log.warning(
+                    f"Could not set status to 'archived' for run {run}, skipping"
+                )
+                continue
         else:
             log.error(f"Failed to archive run {run}")
             update_status(run, "archiving_failed", couchdb_url, auth)
