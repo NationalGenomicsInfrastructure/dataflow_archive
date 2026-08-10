@@ -57,7 +57,9 @@ def collect_runs_to_archive(conf, couchdb_url, auth):
                 continue
 
             log.info(f"Found run eligible for archiving: {run_id}")
-            runs_to_archive.append(run_id)
+            runs_to_archive.append(
+                {"run_id": run_id, "gpg_file": gpg_file, "key_file": key_file}
+            )
 
     except (requests.RequestException, ValueError) as e:
         log.error(f"Error collecting runs to archive: {e}")
@@ -65,9 +67,8 @@ def collect_runs_to_archive(conf, couchdb_url, auth):
     return runs_to_archive
 
 
-def upload_to_pdc(run, conf):
+def upload_to_pdc(run, gpg_file, key_file):
     """Upload the run's tar.gpg and key files to PDC using dsmc."""
-    gpg_file = Path(conf["destination_path"]) / f"{run}.tar.gpg"
     try:
         subprocess.run(["dsmc", "archive", str(gpg_file)], check=True)
     except subprocess.CalledProcessError as e:
@@ -76,7 +77,6 @@ def upload_to_pdc(run, conf):
 
     sleep(15)  # ensure file is fully written and closed before next upload
 
-    key_file = Path.home() / "run_keys" / f"{run}.key.gpg"
     try:
         subprocess.run(["dsmc", "archive", str(key_file)], check=True)
     except subprocess.CalledProcessError as e:
@@ -166,12 +166,8 @@ def update_status(run, status, couchdb_url, auth, max_retries=3):
     return False
 
 
-def delete_archived_files(run, conf):
+def delete_archived_files(run, gpg_file, key_file):
     """Delete local tar.gpg and key files for the run after successful upload to PDC"""
-    destination_path = Path(conf["destination_path"])
-    gpg_file = destination_path / f"{run}.tar.gpg"
-    key_file = Path.home() / "run_keys" / f"{run}.key.gpg"
-
     try:
         if gpg_file.exists():
             gpg_file.unlink()
@@ -192,27 +188,31 @@ def main(conf):
 
     runs_to_archive = collect_runs_to_archive(conf, couchdb_url, auth)
     for run in runs_to_archive:
+        run_id = run["run_id"]
+        gpg_file = run["gpg_file"]
+        key_file = run["key_file"]
+
         # Phase 1: claim the run by marking it as 'archiving' before touching PDC.
         # This prevents a re-run from uploading the same run again if status update
         # failed after a previous successful upload.
-        if not update_status(run, "archiving", couchdb_url, auth):
-            log.warning(f"Could not set status to 'archiving' for run {run}, skipping")
+        if not update_status(run_id, "archiving", couchdb_url, auth):
+            log.warning(f"Could not set status to 'archiving' for run {run_id}, skipping")
             continue
 
         # Phase 2: upload and then record the outcome.
-        if upload_to_pdc(run, conf):
-            log.info(f"Successfully uploaded run {run} to PDC")
-            if update_status(run, "archived", couchdb_url, auth):
-                if not delete_archived_files(run, conf):
-                    log.warning(f"Failed to delete local files for run {run}")
+        if upload_to_pdc(run_id, gpg_file, key_file):
+            log.info(f"Successfully uploaded run {run_id} to PDC")
+            if update_status(run_id, "archived", couchdb_url, auth):
+                if not delete_archived_files(run_id, gpg_file, key_file):
+                    log.warning(f"Failed to delete local files for run {run_id}")
             else:
                 log.warning(
-                    f"Could not set status to 'archived' for run {run}, skipping"
+                    f"Could not set status to 'archived' for run {run_id}, skipping"
                 )
                 continue
         else:
-            log.error(f"Failed to archive run {run}")
-            update_status(run, "archiving_failed", couchdb_url, auth)
+            log.error(f"Failed to archive run {run_id}")
+            update_status(run_id, "archiving_failed", couchdb_url, auth)
 
 
 def cli():
