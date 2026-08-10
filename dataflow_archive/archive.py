@@ -181,6 +181,8 @@ def delete_archived_files(run, conf):
             log.info(f"Deleted local key file: {key_file}")
     except Exception as e:
         log.error(f"Error deleting archived files for run {run}: {e}")
+        return False
+    return True
 
 
 def main(conf):
@@ -201,7 +203,8 @@ def main(conf):
         if upload_to_pdc(run, conf):
             log.info(f"Successfully uploaded run {run} to PDC")
             if update_status(run, "archived", couchdb_url, auth):
-                delete_archived_files(run, conf)
+                if not delete_archived_files(run, conf):
+                    log.warning(f"Failed to delete local files for run {run}")
             else:
                 log.warning(
                     f"Could not set status to 'archived' for run {run}, skipping"
