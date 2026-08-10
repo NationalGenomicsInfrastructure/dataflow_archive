@@ -116,22 +116,54 @@ def upload_to_pdc(run, conf):
     return True
 
 
-def update_status(run, status, couchdb_url, auth):
-    # Fetch current document for run from CouchDB
-    response = requests.get(f"{couchdb_url}/{run}", auth=auth, timeout=30)
-    if response.status_code != 200:
-        log.error(f"Failed to fetch document for run {run}: {response.status_code}")
-        return
-    doc = response.json()
-    doc["status"] = status
-    try:
-        response = requests.put(f"{couchdb_url}/{run}", json=doc, auth=auth, timeout=30)
-        if response.status_code != 201:
-            log.error(f"Failed to update document for run {run}: {response.status_code}")
-    except requests.RequestException as e:
-        log.error(f"Error updating document for run {run}: {e}")
-        return False
-    return True
+def update_status(run, status, couchdb_url, auth, max_retries=3):
+    """Update the status of a run in CouchDB.
+
+    Retries up to max_retries times. On a 409 conflict the document is
+    refetched before each retry so the latest _rev is always used.
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.get(f"{couchdb_url}/{run}", auth=auth, timeout=30)
+            if response.status_code != 200:
+                log.error(
+                    f"Failed to fetch document for run {run}: {response.status_code}"
+                )
+                return False
+
+            doc = response.json()
+            doc["status"] = status
+
+            response = requests.put(
+                f"{couchdb_url}/{run}", json=doc, auth=auth, timeout=30
+            )
+            if response.status_code in (200, 201, 202):
+                log.debug(f"Updated status for run {run} to '{status}'")
+                return True
+            elif response.status_code == 409:
+                log.warning(
+                    f"Conflict updating status for run {run} "
+                    f"(attempt {attempt}/{max_retries}), retrying..."
+                )
+                continue
+            else:
+                log.error(
+                    f"Failed to update status for run {run}: {response.status_code}"
+                )
+                return False
+
+        except requests.RequestException as e:
+            log.error(f"Network error updating status for run {run}: {e}")
+            if attempt < max_retries:
+                sleep(2)
+                continue
+            return False
+
+    log.error(
+        f"Failed to update status for run {run} to '{status}' "
+        f"after {max_retries} attempts"
+    )
+    return False
 
 
 def delete_archived_files(run, conf):
@@ -158,10 +190,23 @@ def main(conf):
 
     runs_to_archive = collect_runs_to_archive(conf, couchdb_url, auth)
     for run in runs_to_archive:
+        # Phase 1: claim the run by marking it as 'archiving' before touching PDC.
+        # This prevents a re-run from uploading the same run again if status update
+        # failed after a previous successful upload.
+        if not update_status(run, "archiving", couchdb_url, auth):
+            log.warning(
+                f"Could not set status to 'archiving' for run {run}, skipping"
+            )
+            continue
+
+        # Phase 2: upload and then record the outcome.
         if upload_to_pdc(run, conf):
-            log.info(f"Successfully archived run {run}")
+            log.info(f"Successfully uploaded run {run} to PDC")
             if update_status(run, "archived", couchdb_url, auth):
                 delete_archived_files(run, conf)
+            else:
+                log.error(f"Failed to update status to 'archived' for run {run}")
+                update_status(run, "archiving_failed", couchdb_url, auth)
         else:
             log.error(f"Failed to archive run {run}")
             update_status(run, "archiving_failed", couchdb_url, auth)
