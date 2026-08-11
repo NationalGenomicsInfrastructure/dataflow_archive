@@ -1,5 +1,6 @@
 import argparse
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from time import sleep
 
@@ -116,7 +117,7 @@ def upload_to_pdc(run, gpg_file, key_file):
     return True
 
 
-def update_status(run, status, couchdb_url, auth, max_retries=3):
+def update_status(run, status, couchdb_url, auth, max_retries=3, extra_fields=None):
     """Update the status of a run in CouchDB.
 
     Retries up to max_retries times. On a 409 conflict the document is
@@ -133,6 +134,8 @@ def update_status(run, status, couchdb_url, auth, max_retries=3):
 
             doc = response.json()
             doc["status"] = status
+            if extra_fields:
+                doc.update(extra_fields)
 
             response = requests.put(
                 f"{couchdb_url}/{run}", json=doc, auth=auth, timeout=30
@@ -196,13 +199,22 @@ def main(conf):
         # This prevents a re-run from uploading the same run again if status update
         # failed after a previous successful upload.
         if not update_status(run_id, "archiving", couchdb_url, auth):
-            log.warning(f"Could not set status to 'archiving' for run {run_id}, skipping")
+            log.warning(
+                f"Could not set status to 'archiving' for run {run_id}, skipping"
+            )
             continue
 
         # Phase 2: upload and then record the outcome.
         if upload_to_pdc(run_id, gpg_file, key_file):
             log.info(f"Successfully uploaded run {run_id} to PDC")
-            if update_status(run_id, "archived", couchdb_url, auth):
+            pdc_archived = datetime.now(timezone.utc).isoformat()
+            if update_status(
+                run_id,
+                "archived",
+                couchdb_url,
+                auth,
+                extra_fields={"pdc_archived": pdc_archived},
+            ):
                 if not delete_archived_files(run_id, gpg_file, key_file):
                     log.warning(f"Failed to delete local files for run {run_id}")
             else:
