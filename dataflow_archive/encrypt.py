@@ -53,7 +53,7 @@ async def claim_run(session, doc, couchdb_url):
     """Attempt to claim a run for processing by updating its status to 'processing' in CouchDB. Returns True if successful, False if another worker claimed it first."""
     updated = doc.copy()
     updated["status"] = "processing"
-    updated["worker_id"] = WORKER_ID
+    updated["encryption_worker_id"] = WORKER_ID
     updated["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     url = f"{couchdb_url}/{doc['_id']}"
@@ -97,7 +97,7 @@ async def update_status(session, doc, status, couchdb_url):
 
 
 async def handle_failure(session, doc, couchdb_url):
-    """Increment failure_count on the document. Reset status to 'pending' for retry,
+    """Increment encryption_failure_count on the document. Reset status to 'pending' for retry,
     or set to 'failed' if MAX_RETRIES is exceeded."""
     # Refetch to get latest _rev and current failure count
     async with session.get(f"{couchdb_url}/{doc['_id']}") as resp:
@@ -108,8 +108,8 @@ async def handle_failure(session, doc, couchdb_url):
             )
         current_doc = await resp.json()
 
-    failure_count = current_doc.get("failure_count", 0) + 1
-    current_doc["failure_count"] = failure_count
+    failure_count = current_doc.get("encryption_failure_count", 0) + 1
+    current_doc["encryption_failure_count"] = failure_count
     current_doc["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     if failure_count >= MAX_RETRIES:
@@ -149,7 +149,7 @@ async def reset_stale_processing_runs(session, couchdb_url):
         row["doc"]
         for row in data.get("rows", [])
         if row.get("doc", {}).get("status") == "processing"
-        and row.get("doc", {}).get("worker_id") == WORKER_ID
+        and row.get("doc", {}).get("encryption_worker_id") == WORKER_ID
     ]
 
     if not stale:

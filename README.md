@@ -128,8 +128,8 @@ Each run is stored as a document with `_id` set to the run directory name:
   "_id": "run_001",
   "path": "/data/sequencing/sequencer_A/run_001",
   "status": "archived",
-  "worker_id": "hostname",
-  "failure_count": 0,
+  "encryption_worker_id": "hostname",
+  "encryption_failure_count": 0,
   "created_at": "2026-04-28T10:00:00+00:00",
   "updated_at": "2026-04-28T10:05:00+00:00",
   "pdc_archived": "2026-04-28T11:00:00+00:00"
