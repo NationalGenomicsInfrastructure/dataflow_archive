@@ -136,6 +136,7 @@ def update_status(run, status, couchdb_url, auth, max_retries=3, extra_fields=No
             doc["status"] = status
             if extra_fields:
                 doc.update(extra_fields)
+            doc["updated_at"] = datetime.now(timezone.utc).isoformat()
 
             response = requests.put(
                 f"{couchdb_url}/{run}", json=doc, auth=auth, timeout=30
