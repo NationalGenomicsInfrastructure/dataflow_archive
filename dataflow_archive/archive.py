@@ -19,12 +19,12 @@ def collect_runs_to_archive(conf, couchdb_url, auth):
     """
     Collect runs to archive by:
     1. Fetching encrypted runs from statusdb view
-    2. Looking for tar.gpg files in destination_path
+    2. Looking for tar.gpg files in archive_staging_path
     3. Checking that the corresponding key files exist in ~/run_keys/
     4. Returning list of runs to archive
     """
     runs_to_archive = []
-    destination_path = Path(conf["destination_path"])
+    archive_staging_path = Path(conf["archive_staging_path"])
 
     try:
         view_url = (
@@ -43,8 +43,8 @@ def collect_runs_to_archive(conf, couchdb_url, auth):
             if run_id:
                 encrypted_runs[run_id] = doc
 
-        # Find all tar.gpg files in destination_path
-        for gpg_file in destination_path.glob("*.tar.gpg"):
+        # Find all tar.gpg files in archive_staging_path
+        for gpg_file in archive_staging_path.glob("*.tar.gpg"):
             run_id = gpg_file.name.replace(".tar.gpg", "")
 
             # Check that the corresponding key file exists in ~/run_keys/

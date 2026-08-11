@@ -59,7 +59,7 @@ statusdb:
   database: archiving_status
 
 sequencing_path: /data/sequencing    # top-level directory; subdirs are per-sequencer (encrypt only)
-destination_path: /data/archives     # where .tar.gpg and .key files are written
+archive_staging_path: /data/archives     # where .tar.gpg and .key files are written
 
 gpg_receiver: user       # GPG key ID or email for key encryption (encrypt only)
 
@@ -150,8 +150,8 @@ Each run is stored as a document with `_id` set to the run directory name:
 
 | File | Location | Description |
 |------|----------|-------------|
-| `<run>.tar.gpg` | `destination_path/` | AES-256 symmetrically encrypted tar archive |
-| `<run>.key` | `destination_path/` | Plaintext encryption key (temporary; deleted after key encryption step) |
+| `<run>.tar.gpg` | `archive_staging_path/` | AES-256 symmetrically encrypted tar archive |
+| `<run>.key` | `archive_staging_path/` | Plaintext encryption key (temporary; deleted after key encryption step) |
 | `<run>.key.gpg` | `~/run_keys/` | Encryption key, asymmetrically encrypted to `gpg_receiver` |
 
 ## Development

@@ -173,11 +173,11 @@ async def reset_stale_processing_runs(session, couchdb_url):
 
 
 async def run_pipeline(
-    run_path: Path, destination_path: Path, tar_exclusions: list[str]
+    run_path: Path, archive_staging_path: Path, tar_exclusions: list[str]
 ):
     """Run the tar + gpg pipeline for a given run directory and return the path to the output GPG file."""
-    output_file = destination_path / f"{run_path.name}.tar.gpg"
-    key_file = destination_path / f"{run_path.name}.key"
+    output_file = archive_staging_path / f"{run_path.name}.tar.gpg"
+    key_file = archive_staging_path / f"{run_path.name}.key"
     key_file.parent.mkdir(parents=True, exist_ok=True)
     log.info(f"Generating encryption key for {run_path.name}")
     gen_key_cmd = ["gpg", "--gen-random", "1", "256"]
@@ -317,7 +317,7 @@ async def process_run(
     session,
     doc,
     couchdb_url,
-    destination_path: Path,
+    archive_staging_path: Path,
     tar_exclusions: list[str],
     gpg_receiver: str,
     semaphore: asyncio.Semaphore,
@@ -330,11 +330,11 @@ async def process_run(
 
         # Track all generated files for cleanup on failure or cancellation
         output_file = None
-        key_file = destination_path / f"{run_path.name}.key"  # created by run_pipeline
+        key_file = archive_staging_path / f"{run_path.name}.key"  # created by run_pipeline
         encrypted_key_file = None
 
         try:
-            output_file = await run_pipeline(run_path, destination_path, tar_exclusions)
+            output_file = await run_pipeline(run_path, archive_staging_path, tar_exclusions)
             await validate_gpg(output_file)
 
             # Encrypt and archive the key
@@ -459,7 +459,7 @@ async def main(conf: dict):
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
     statusdb_conf = conf["statusdb"]
     sequencing_path = Path(conf["sequencing_path"])
-    destination_path = Path(conf["destination_path"])
+    archive_staging_path = Path(conf["archive_staging_path"])
     ignore_dirs = conf["ignore"]
     tar_exclusions = conf["tar_exclusions"]
     gpg_receiver = conf["gpg_receiver"]
@@ -470,9 +470,9 @@ async def main(conf: dict):
             f"sequencing_path does not exist or is not a directory: {sequencing_path}"
         )
 
-    if not destination_path.is_dir():
+    if not archive_staging_path.is_dir():
         raise RuntimeError(
-            f"destination_path does not exist or is not a directory: {destination_path}"
+            f"archive_staging_path does not exist or is not a directory: {archive_staging_path}"
         )
 
     couchdb_url = build_couchdb_url(statusdb_conf)
@@ -511,7 +511,7 @@ async def main(conf: dict):
                                 session,
                                 doc,
                                 couchdb_url,
-                                destination_path,
+                                archive_staging_path,
                                 tar_exclusions,
                                 gpg_receiver,
                                 semaphore,
