@@ -68,50 +68,28 @@ def collect_runs_to_archive(conf, couchdb_url, auth):
     return runs_to_archive
 
 
-def upload_to_pdc(run, gpg_file, key_file):
-    """Upload the run's tar.gpg and key files to PDC using dsmc."""
+def upload_to_pdc(file_path):
+    """Upload a single file to PDC using dsmc and verify it was archived."""
     try:
-        subprocess.run(["dsmc", "archive", str(gpg_file)], check=True)
+        subprocess.run(["dsmc", "archive", str(file_path)], check=True)
     except subprocess.CalledProcessError as e:
-        log.error(f"Error uploading archive file for run {run}: {e}")
+        log.error(f"Error uploading {file_path.name}: {e}")
         return False
 
-    sleep(15)  # ensure file is fully written and closed before next upload
-
-    try:
-        subprocess.run(["dsmc", "archive", str(key_file)], check=True)
-    except subprocess.CalledProcessError as e:
-        log.error(f"Error uploading key file for run {run}: {e}")
-        return False
-
-    sleep(5)  # ensure file is fully written and closed before verification
+    sleep(15)  # ensure file is fully written and closed before verification
 
     try:
         result = subprocess.run(
-            ["dsmc", "query", "archive", str(gpg_file)],
+            ["dsmc", "query", "archive", str(file_path)],
             check=True,
             capture_output=True,
             text=True,
         )
         if "No files matching search criteria were found" in result.stdout:
-            log.error(f"Archive file for run {run} not found in PDC after upload")
+            log.error(f"{file_path.name} not found in PDC after upload")
             return False
     except subprocess.CalledProcessError as e:
-        log.error(f"Error querying archive file for run {run}: {e}")
-        return False
-
-    try:
-        result = subprocess.run(
-            ["dsmc", "query", "archive", str(key_file)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        if "No files matching search criteria were found" in result.stdout:
-            log.error(f"Key file for run {run} not found in PDC after upload")
-            return False
-    except subprocess.CalledProcessError as e:
-        log.error(f"Error querying key file for run {run}: {e}")
+        log.error(f"Error querying {file_path.name}: {e}")
         return False
 
     return True
@@ -206,7 +184,7 @@ def main(conf):
             continue
 
         # Phase 2: upload and then record the outcome.
-        if upload_to_pdc(run_id, gpg_file, key_file):
+        if upload_to_pdc(gpg_file) and upload_to_pdc(key_file):
             log.info(f"Successfully uploaded run {run_id} to PDC")
             pdc_archived = datetime.now(timezone.utc).isoformat()
             if update_status(
