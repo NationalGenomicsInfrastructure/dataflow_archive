@@ -130,7 +130,7 @@ def update_status(run, status, couchdb_url, auth, max_retries=3, extra_fields=No
                 log.error(
                     f"Failed to fetch document for run {run}: {response.status_code}"
                 )
-                return False
+                continue
 
             doc = response.json()
             doc["status"] = status
