@@ -93,7 +93,7 @@ def upload_to_pdc(run, gpg_file, key_file):
             capture_output=True,
             text=True,
         )
-        if "Archived" not in result.stdout:
+        if "No files matching search criteria were found" in result.stdout:
             log.error(f"Archive file for run {run} not found in PDC after upload")
             return False
     except subprocess.CalledProcessError as e:
@@ -107,7 +107,7 @@ def upload_to_pdc(run, gpg_file, key_file):
             capture_output=True,
             text=True,
         )
-        if "Archived" not in result.stdout:
+        if "No files matching search criteria were found" in result.stdout:
             log.error(f"Key file for run {run} not found in PDC after upload")
             return False
     except subprocess.CalledProcessError as e:
