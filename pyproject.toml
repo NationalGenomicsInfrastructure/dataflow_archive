@@ -42,7 +42,8 @@ dev = [
 ]
 
 [project.scripts]
-dataflow_archive = "dataflow_archive.main:cli"
+dataflow_archive = "dataflow_archive.archive:cli"
+dataflow_encrypt = "dataflow_archive.encrypt:cli"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

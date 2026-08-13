@@ -1,17 +1,19 @@
 import argparse
 import asyncio
 import logging
-import os
 import signal
 import socket
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
 
 import aiohttp
-import yaml
 
 from dataflow_archive.log import init_logger_file
+from dataflow_archive.utils.utils import (
+    CONFIG_DEFAULT_PATH,
+    build_couchdb_url,
+    load_config,
+)
 
 log = logging.getLogger(__name__)
 
@@ -20,83 +22,10 @@ MAX_RETRIES = 3
 
 WORKER_ID = socket.gethostname()
 
-CONFIG_DEFAULT_PATH = Path(
-    os.environ.get(
-        "ARCHIVE_CONFIG",
-        os.path.join(os.path.expanduser("~"), "conf/df_archive.yaml"),
-    )
-).expanduser()
-
-
-def load_config(config_path: Path):
-    with config_path.open() as file:
-        config = yaml.safe_load(file)
-
-    if not isinstance(config, dict):
-        raise RuntimeError("Config file must contain a mapping")
-
-    log_file = config.get("log_file")
-    if log_file and not isinstance(log_file, str):
-        raise RuntimeError("Config entry 'log_file' must be a string")
-
-    statusdb = config.get("statusdb")
-    if not isinstance(statusdb, dict):
-        raise RuntimeError("Missing 'statusdb' section in config")
-
-    for key in ("username", "password", "url", "database"):
-        if not statusdb.get(key):
-            raise RuntimeError(f"Missing required statusdb config: {key}")
-
-    sequencing_path = config.get("sequencing_path")
-    if not sequencing_path:
-        raise RuntimeError("Missing required config entry: sequencing_path")
-
-    destination_path = config.get("destination_path")
-    if not destination_path:
-        raise RuntimeError("Missing required config entry: destination_path")
-
-    ignore_list = config.get("ignore", [])
-    if ignore_list is None:
-        ignore_list = []
-    if not isinstance(ignore_list, list):
-        raise RuntimeError("Config entry 'ignore' must be a list")
-
-    tar_exclusions = config.get("tar_exclusions", [])
-    if tar_exclusions is None:
-        tar_exclusions = []
-    if not isinstance(tar_exclusions, list):
-        raise RuntimeError("Config entry 'tar_exclusions' must be a list")
-
-    gpg_receiver = config.get("gpg_receiver")
-    if not gpg_receiver:
-        raise RuntimeError("Missing required config entry: gpg_receiver")
-
-    return {
-        "log_file": log_file,
-        "statusdb": statusdb,
-        "sequencing_path": sequencing_path,
-        "destination_path": destination_path,
-        "ignore": ignore_list,
-        "tar_exclusions": tar_exclusions,
-        "gpg_receiver": gpg_receiver,
-    }
-
 
 # ------------------------
 # CouchDB helpers
 # ------------------------
-
-
-def build_couchdb_url(statusdb: dict) -> str:
-    raw_url = statusdb["url"].strip()
-    if not raw_url:
-        raise RuntimeError("statusdb.url must not be empty")
-
-    if not urlparse(raw_url).scheme:
-        raw_url = f"https://{raw_url}"
-
-    database = statusdb["database"].strip().lstrip("/")
-    return f"{raw_url.rstrip('/')}/{database}"
 
 
 async def fetch_pending_runs(session, couchdb_url):
@@ -124,7 +53,7 @@ async def claim_run(session, doc, couchdb_url):
     """Attempt to claim a run for processing by updating its status to 'processing' in CouchDB. Returns True if successful, False if another worker claimed it first."""
     updated = doc.copy()
     updated["status"] = "processing"
-    updated["worker_id"] = WORKER_ID
+    updated["encryption_worker_id"] = WORKER_ID
     updated["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     url = f"{couchdb_url}/{doc['_id']}"
@@ -168,7 +97,7 @@ async def update_status(session, doc, status, couchdb_url):
 
 
 async def handle_failure(session, doc, couchdb_url):
-    """Increment failure_count on the document. Reset status to 'pending' for retry,
+    """Increment encryption_failure_count on the document. Reset status to 'pending' for retry,
     or set to 'failed' if MAX_RETRIES is exceeded."""
     # Refetch to get latest _rev and current failure count
     async with session.get(f"{couchdb_url}/{doc['_id']}") as resp:
@@ -179,8 +108,8 @@ async def handle_failure(session, doc, couchdb_url):
             )
         current_doc = await resp.json()
 
-    failure_count = current_doc.get("failure_count", 0) + 1
-    current_doc["failure_count"] = failure_count
+    failure_count = current_doc.get("encryption_failure_count", 0) + 1
+    current_doc["encryption_failure_count"] = failure_count
     current_doc["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     if failure_count >= MAX_RETRIES:
@@ -220,7 +149,7 @@ async def reset_stale_processing_runs(session, couchdb_url):
         row["doc"]
         for row in data.get("rows", [])
         if row.get("doc", {}).get("status") == "processing"
-        and row.get("doc", {}).get("worker_id") == WORKER_ID
+        and row.get("doc", {}).get("encryption_worker_id") == WORKER_ID
     ]
 
     if not stale:
@@ -244,11 +173,11 @@ async def reset_stale_processing_runs(session, couchdb_url):
 
 
 async def run_pipeline(
-    run_path: Path, destination_path: Path, tar_exclusions: list[str]
+    run_path: Path, archive_staging_path: Path, tar_exclusions: list[str]
 ):
     """Run the tar + gpg pipeline for a given run directory and return the path to the output GPG file."""
-    output_file = destination_path / f"{run_path.name}.tar.gpg"
-    key_file = destination_path / f"{run_path.name}.key"
+    output_file = archive_staging_path / f"{run_path.name}.tar.gpg"
+    key_file = archive_staging_path / f"{run_path.name}.key"
     key_file.parent.mkdir(parents=True, exist_ok=True)
     log.info(f"Generating encryption key for {run_path.name}")
     gen_key_cmd = ["gpg", "--gen-random", "1", "256"]
@@ -388,7 +317,7 @@ async def process_run(
     session,
     doc,
     couchdb_url,
-    destination_path: Path,
+    archive_staging_path: Path,
     tar_exclusions: list[str],
     gpg_receiver: str,
     semaphore: asyncio.Semaphore,
@@ -401,11 +330,11 @@ async def process_run(
 
         # Track all generated files for cleanup on failure or cancellation
         output_file = None
-        key_file = destination_path / f"{run_path.name}.key"  # created by run_pipeline
+        key_file = archive_staging_path / f"{run_path.name}.key"  # created by run_pipeline
         encrypted_key_file = None
 
         try:
-            output_file = await run_pipeline(run_path, destination_path, tar_exclusions)
+            output_file = await run_pipeline(run_path, archive_staging_path, tar_exclusions)
             await validate_gpg(output_file)
 
             # Encrypt and archive the key
@@ -530,7 +459,7 @@ async def main(conf: dict):
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
     statusdb_conf = conf["statusdb"]
     sequencing_path = Path(conf["sequencing_path"])
-    destination_path = Path(conf["destination_path"])
+    archive_staging_path = Path(conf["archive_staging_path"])
     ignore_dirs = conf["ignore"]
     tar_exclusions = conf["tar_exclusions"]
     gpg_receiver = conf["gpg_receiver"]
@@ -541,9 +470,9 @@ async def main(conf: dict):
             f"sequencing_path does not exist or is not a directory: {sequencing_path}"
         )
 
-    if not destination_path.is_dir():
+    if not archive_staging_path.is_dir():
         raise RuntimeError(
-            f"destination_path does not exist or is not a directory: {destination_path}"
+            f"archive_staging_path does not exist or is not a directory: {archive_staging_path}"
         )
 
     couchdb_url = build_couchdb_url(statusdb_conf)
@@ -582,7 +511,7 @@ async def main(conf: dict):
                                 session,
                                 doc,
                                 couchdb_url,
-                                destination_path,
+                                archive_staging_path,
                                 tar_exclusions,
                                 gpg_receiver,
                                 semaphore,
@@ -613,9 +542,9 @@ async def main(conf: dict):
 
 
 def cli():
-    """Entry point for the archive worker script."""
+    """Entry point for the archive encryption script."""
     parser = argparse.ArgumentParser(
-        description="Archive runs and update CouchDB status from a YAML config file"
+        description="Encrypt runs and update CouchDB status"
     )
     parser.add_argument(
         "-c",
@@ -632,5 +561,5 @@ def cli():
         log_level = conf.get("log_level", "INFO")
         init_logger_file(log_file, log_level)
 
-    log.info(f"Starting archive worker with config: {args.config_file}")
+    log.info(f"Starting encryption worker with config: {args.config_file}")
     asyncio.run(main(conf))
