@@ -330,11 +330,15 @@ async def process_run(
 
         # Track all generated files for cleanup on failure or cancellation
         output_file = None
-        key_file = archive_staging_path / f"{run_path.name}.key"  # created by run_pipeline
+        key_file = (
+            archive_staging_path / f"{run_path.name}.key"
+        )  # created by run_pipeline
         encrypted_key_file = None
 
         try:
-            output_file = await run_pipeline(run_path, archive_staging_path, tar_exclusions)
+            output_file = await run_pipeline(
+                run_path, archive_staging_path, tar_exclusions
+            )
             await validate_gpg(output_file)
 
             # Encrypt and archive the key
@@ -381,6 +385,9 @@ async def scan_for_new_runs(
     for sequencer_dir in sequencing_path.iterdir():
         if not sequencer_dir.is_dir():
             log.debug(f"Skipping non-directory {sequencer_dir}")
+            continue
+        if sequencer_dir.name in ignore_dirs:
+            log.debug(f"Skipping ignored directory {sequencer_dir}")
             continue
 
         for run_dir in sequencer_dir.iterdir():
