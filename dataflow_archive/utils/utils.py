@@ -34,9 +34,9 @@ def load_config(config_path: Path):
     if not sequencing_path:
         raise RuntimeError("Missing required config entry: sequencing_path")
 
-    destination_path = config.get("destination_path")
-    if not destination_path:
-        raise RuntimeError("Missing required config entry: destination_path")
+    archive_staging_path = config.get("archive_staging_path")
+    if not archive_staging_path:
+        raise RuntimeError("Missing required config entry: archive_staging_path")
 
     ignore_list = config.get("ignore", [])
     if ignore_list is None:
@@ -58,7 +58,7 @@ def load_config(config_path: Path):
         "log_file": log_file,
         "statusdb": statusdb,
         "sequencing_path": sequencing_path,
-        "destination_path": destination_path,
+        "archive_staging_path": archive_staging_path,
         "ignore": ignore_list,
         "tar_exclusions": tar_exclusions,
         "gpg_receiver": gpg_receiver,
