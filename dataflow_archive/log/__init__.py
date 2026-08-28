@@ -2,6 +2,7 @@
 
 import logging
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 
 # session id is the timestamp when this module is imported (script start)
 SESSION_ID = datetime.now().strftime("%y%m%d%H%M")
@@ -36,11 +37,13 @@ LOG_LEVELS = {
 }
 
 
-def init_logger_file(log_file, log_level="INFO"):
-    """Append a FileHandler to the root logger.
+def init_logger_file(log_file, log_level="INFO", max_bytes=10_485_760, backup_count=5):
+    """Append a RotatingFileHandler to the root logger.
 
     :param str log_file: Path to the log file
     :param str log_level: Logging level
+    :param int max_bytes: Maximum size of each log file in bytes (default 10 MB)
+    :param int backup_count: Number of backup files to keep (default 5)
     """
     ROOT_LOG.handlers = []
     log_level = (
@@ -49,7 +52,9 @@ def init_logger_file(log_file, log_level="INFO"):
 
     ROOT_LOG.setLevel(log_level)
 
-    file_handle = logging.FileHandler(log_file)
+    file_handle = RotatingFileHandler(
+        log_file, maxBytes=max_bytes, backupCount=backup_count
+    )
     file_handle.setLevel(log_level)
     file_handle.setFormatter(formatter)
     file_handle.addFilter(SessionFilter())
