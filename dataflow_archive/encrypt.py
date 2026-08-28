@@ -541,7 +541,7 @@ async def main(conf: dict):
 
             log.info("Sleeping before next scan...")
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=30)
+                await asyncio.wait_for(shutdown_event.wait(), timeout=1800)
             except asyncio.TimeoutError:
                 pass  # normal wake-up, continue the loop
 
