@@ -11,6 +11,7 @@ CONFIG_DEFAULT_PATH = Path(
     )
 ).expanduser()
 
+
 def load_config(config_path: Path):
     with config_path.open() as file:
         config = yaml.safe_load(file)
@@ -18,9 +19,15 @@ def load_config(config_path: Path):
     if not isinstance(config, dict):
         raise RuntimeError("Config file must contain a mapping")
 
-    log_file = config.get("log_file")
-    if log_file and not isinstance(log_file, str):
-        raise RuntimeError("Config entry 'log_file' must be a string")
+    encrypt_log_file = config.get("encrypt_log_file")
+    if encrypt_log_file and not isinstance(encrypt_log_file, str):
+        raise RuntimeError("Config entry 'encrypt_log_file' must be a string")
+
+    archive_log_file = config.get("archive_log_file")
+    if archive_log_file and not isinstance(archive_log_file, str):
+        raise RuntimeError("Config entry 'archive_log_file' must be a string")
+
+    log_level = config.get("log_level", "INFO")
 
     statusdb = config.get("statusdb")
     if not isinstance(statusdb, dict):
@@ -55,7 +62,9 @@ def load_config(config_path: Path):
         raise RuntimeError("Missing required config entry: gpg_receiver")
 
     return {
-        "log_file": log_file,
+        "encrypt_log_file": encrypt_log_file,
+        "archive_log_file": archive_log_file,
+        "log_level": log_level,
         "statusdb": statusdb,
         "sequencing_path": sequencing_path,
         "archive_staging_path": archive_staging_path,
@@ -63,7 +72,8 @@ def load_config(config_path: Path):
         "tar_exclusions": tar_exclusions,
         "gpg_receiver": gpg_receiver,
     }
-    
+
+
 def build_couchdb_url(statusdb: dict) -> str:
     raw_url = statusdb["url"].strip()
     if not raw_url:

@@ -221,7 +221,7 @@ def cli():
 
     # Load config and set up logging before starting main loop
     conf = load_config(Path(args.config_file))
-    log_file = conf.get("log_file")
+    log_file = conf.get("archive_log_file")
     if log_file:
         log_level = conf.get("log_level", "INFO")
         init_logger_file(log_file, log_level)

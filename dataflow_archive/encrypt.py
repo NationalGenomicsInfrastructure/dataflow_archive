@@ -65,7 +65,7 @@ async def claim_run(session, doc, couchdb_url):
             )
             return False  # lost the race
         elif resp.status in (200, 201, 202):
-            log.info(f"Claimed run {doc['_id']} on worker {WORKER_ID}")
+            log.debug(f"Claimed run {doc['_id']} on worker {WORKER_ID}")
             return True
         else:
             text = await resp.text()
@@ -93,7 +93,7 @@ async def update_status(session, doc, status, couchdb_url):
             raise RuntimeError(
                 f"Failed to update status to '{status}': {resp.status} {text}"
             )
-        log.info(f"Run {doc['_id']}: status updated to '{status}'")
+        log.debug(f"Run {doc['_id']}: status updated to '{status}'")
 
 
 async def handle_failure(session, doc, couchdb_url):
@@ -179,7 +179,7 @@ async def run_pipeline(
     output_file = archive_staging_path / f"{run_path.name}.tar.gpg"
     key_file = archive_staging_path / f"{run_path.name}.key"
     key_file.parent.mkdir(parents=True, exist_ok=True)
-    log.info(f"Generating encryption key for {run_path.name}")
+    log.debug(f"Generating encryption key for {run_path.name}")
     gen_key_cmd = ["gpg", "--gen-random", "1", "256"]
     proc = await asyncio.create_subprocess_exec(
         *gen_key_cmd,
@@ -285,7 +285,7 @@ async def encrypt_and_archive_key(key_file: Path, gpg_receiver: str):
     keys_dir.mkdir(parents=True, exist_ok=True)
 
     encrypted_key_path = keys_dir / (key_file.name + ".gpg")
-    log.info(f"Encrypting key {key_file.name} for recipient {gpg_receiver}")
+    log.debug(f"Encrypting key {key_file.name} for recipient {gpg_receiver}")
     cmd = [
         "gpg",
         "--encrypt",
@@ -353,7 +353,7 @@ async def process_run(
             for f in (output_file, key_file, encrypted_key_file):
                 if f and f.exists():
                     f.unlink()
-                    log.info(f"Cleaned up {f}")
+                    log.debug(f"Cleaned up {f}")
             raise  # propagate; run stays 'processing' until next startup reset
 
         except Exception as e:
@@ -363,7 +363,7 @@ async def process_run(
             for f in (output_file, key_file, encrypted_key_file):
                 if f and f.exists():
                     f.unlink()
-                    log.info(f"Cleaned up {f}")
+                    log.debug(f"Cleaned up {f}")
 
             await handle_failure(session, doc, couchdb_url)
 
@@ -381,7 +381,7 @@ async def scan_for_new_runs(
     final_file: str,
 ):
     """Scan the sequencing directory for new runs and add them to CouchDB if they are not already present."""
-    log.info(f"Scanning for new runs in {sequencing_path}")
+    log.debug(f"Scanning for new runs in {sequencing_path}")
     for sequencer_dir in sequencing_path.iterdir():
         if not sequencer_dir.is_dir():
             log.debug(f"Skipping non-directory {sequencer_dir}")
@@ -498,7 +498,7 @@ async def main(conf: dict):
             # fetch pending jobs
             docs = await fetch_pending_runs(session, couchdb_url)
 
-            log.info(f"Found {len(docs)} pending runs in CouchDB")
+            log.info(f"Found {len(docs)} pending run(s) in CouchDB")
 
             # Process runs, picking up new ones as slots become available
             docs_queue = list(docs)
@@ -510,7 +510,7 @@ async def main(conf: dict):
                 # Fill available slots with new jobs
                 while len(active_tasks) < MAX_CONCURRENT_JOBS and docs_queue:
                     doc = docs_queue.pop(0)
-                    log.info(f"Found pending run: {doc['_id']} at {doc['path']}")
+                    log.debug(f"Found pending run: {doc['_id']} at {doc['path']}")
                     claimed = await claim_run(session, doc, couchdb_url)
                     if claimed:
                         task = asyncio.create_task(
@@ -534,14 +534,16 @@ async def main(conf: dict):
                 done, pending = await asyncio.wait(
                     active_tasks, return_when=asyncio.FIRST_COMPLETED
                 )
-                log.info(f"Completed {len(done)} task(s), {len(pending)} still running")
+                log.debug(
+                    f"Completed {len(done)} task(s), {len(pending)} still running"
+                )
 
             if shutdown_event.is_set():
                 break
 
-            log.info("Sleeping before next scan...")
+            log.debug("Sleeping before next scan...")
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=30)
+                await asyncio.wait_for(shutdown_event.wait(), timeout=1800)
             except asyncio.TimeoutError:
                 pass  # normal wake-up, continue the loop
 
@@ -563,7 +565,7 @@ def cli():
 
     # Load config and set up logging before starting main loop
     conf = load_config(Path(args.config_file))
-    log_file = conf.get("log_file")
+    log_file = conf.get("encrypt_log_file")
     if log_file:
         log_level = conf.get("log_level", "INFO")
         init_logger_file(log_file, log_level)
